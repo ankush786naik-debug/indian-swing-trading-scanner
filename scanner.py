@@ -1,362 +1,566 @@
+
 #!/usr/bin/env python3
-"""
-Indian Swing Trading Scanner
-----------------------------
-Scans up to 500 NSE stocks using EODHD daily prices and fundamentals.
 
-Required environment variables:
-  EODHD_API_TOKEN       EODHD API token
-Optional:
-  CAPITAL                Trading capital in INR (default: 100000)
-  MIN_STOCK_PRICE        Minimum stock price (default: 200)
-  MAX_STOCKS             Maximum symbols to scan (default: 50)
-  RISK_PER_TRADE         Fraction of capital risked per trade (default: 0.01)
-  TELEGRAM_BOT_TOKEN     Telegram bot token (optional)
-  TELEGRAM_CHAT_ID       Telegram chat/channel ID (optional)
-  SYMBOLS_FILE           Path to symbols file (default: symbols.txt)
-
-symbols.txt should contain one EODHD symbol per line, e.g.:
-  RELIANCE.NSE
-  TCS.NSE
-  HDFCBANK.NSE
-
-This is a screening/education tool, not investment advice. Verify every
-signal and price independently before placing an order.
-"""
-
-from __future__ import annotations
-
-import logging
 import os
 import sys
-from dataclasses import dataclass
+import time
+import logging
 from datetime import date, timedelta
-from typing import Any
+from collections import Counter
 
-import numpy as np
-import pandas as pd
 import requests
+import pandas as pd
+import numpy as np
 from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_URL = "https://eodhd.com/api"
+# CONFIGURATION
 API_TOKEN = os.getenv("EODHD_API_TOKEN", "").strip()
+BASE_URL = "https://eodhd.com/api"
+
 CAPITAL = float(os.getenv("CAPITAL", "100000"))
-MIN_STOCK_PRICE = float(os.getenv("MIN_STOCK_PRICE", "200"))
+MIN_PRICE = float(os.getenv("MIN_STOCK_PRICE", "200"))
 MAX_STOCKS = int(os.getenv("MAX_STOCKS", "500"))
-RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.01"))
-SYMBOLS_FILE = os.getenv("SYMBOLS_FILE", "symbols.txt")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+RISK_PERCENT = float(os.getenv("RISK_PER_TRADE", "0.01"))
+
+API_DELAY = float(os.getenv("API_MIN_INTERVAL_SEC", "1.1"))
+MAX_RETRIES = int(os.getenv("API_MAX_RETRIES", "4"))
+MIN_COVERAGE = float(os.getenv("MIN_DATA_COVERAGE", "0.80"))
+
+SYMBOL_FILE = os.getenv("SYMBOLS_FILE", "symbols.txt")
+
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
-log = logging.getLogger("swing-scanner")
-SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "IndianSwingScanner/1.0"})
+
+log = logging.getLogger("scanner")
+
+session = requests.Session()
+session.headers.update({"User-Agent": "IndianSwingScanner/2.0"})
+
+last_request = 0.0
 
 
-@dataclass
-class Signal:
-    symbol: str
-    price: float
-    entry: float
-    stop_loss: float
-    target_1: float
-    target_2: float
-    quantity: int
-    risk_amount: float
-    reward_risk: float
-    score: int
-    reason: str
+def telegram(message):
 
+    if not BOT_TOKEN or not CHAT_ID:
+        log.info("Telegram not configured")
+        return
 
-def api_get(path: str, params: dict[str, Any] | None = None) -> Any:
-    if not API_TOKEN:
-        raise RuntimeError("EODHD_API_TOKEN is missing. Add it to GitHub Secrets/.env.")
-    query = dict(params or {})
-    query["api_token"] = API_TOKEN
-    query["fmt"] = "json"
-    response = SESSION.get(f"{BASE_URL}/{path.lstrip('/')}", params=query, timeout=30)
+    response = session.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        data={
+            "chat_id": CHAT_ID,
+            "text": message
+        },
+        timeout=20
+    )
+
     response.raise_for_status()
-    data = response.json()
-    if isinstance(data, dict) and data.get("error"):
-        raise RuntimeError(str(data["error"]))
-    return data
 
 
-def load_symbols() -> list[str]:
-    path = SYMBOLS_FILE
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"{path} not found. Create it with one EODHD NSE ticker per line, "
-            "for example RELIANCE.NSE."
-        )
-    symbols: list[str] = []
-    with open(path, "r", encoding="utf-8") as handle:
-        for raw in handle:
-            value = raw.strip().upper()
-            if value and not value.startswith("#") and value not in symbols:
-                symbols.append(value)
-    if not symbols:
-        raise ValueError(f"No symbols found in {path}.")
+def api_get(path, params=None):
+
+    global last_request
+
+    if not API_TOKEN:
+        raise RuntimeError("EODHD_API_TOKEN missing")
+
+    query = dict(params or {})
+    query.update({
+        "api_token": API_TOKEN,
+        "fmt": "json"
+    })
+
+    url = f"{BASE_URL}/{path}"
+
+    for attempt in range(MAX_RETRIES + 1):
+
+        wait = API_DELAY - (time.monotonic() - last_request)
+
+        if wait > 0:
+            time.sleep(wait)
+
+        try:
+            response = session.get(
+                url,
+                params=query,
+                timeout=45
+            )
+            last_request = time.monotonic()
+
+        except requests.RequestException:
+
+            if attempt == MAX_RETRIES:
+                raise
+
+            delay = min(2 ** attempt, 30)
+            log.warning("Network retry in %s seconds", delay)
+            time.sleep(delay)
+            continue
+
+        if response.status_code == 429 or response.status_code >= 500:
+
+            if attempt == MAX_RETRIES:
+                raise RuntimeError(
+                    f"API unavailable: HTTP {response.status_code}"
+                )
+
+            retry_after = response.headers.get("Retry-After")
+
+            try:
+                delay = max(float(retry_after), 2)
+            except (TypeError, ValueError):
+                delay = min(2 ** (attempt + 1), 30)
+
+            log.warning("HTTP %s. Retry in %s seconds",
+                        response.status_code, delay)
+
+            time.sleep(delay)
+            continue
+
+        if response.status_code in (401, 403):
+            raise RuntimeError(
+                f"Authentication/subscription error: HTTP {response.status_code}"
+            )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if isinstance(data, dict) and data.get("error"):
+            raise RuntimeError(str(data["error"]))
+
+        return data
+
+    raise RuntimeError("API request failed")
+
+
+def load_symbols():
+
+    if not os.path.exists(SYMBOL_FILE):
+        raise FileNotFoundError(SYMBOL_FILE)
+
+    symbols = []
+
+    with open(SYMBOL_FILE, encoding="utf-8") as file:
+
+        for line in file:
+
+            symbol = line.strip().upper()
+
+            if symbol and not symbol.startswith("#"):
+                if symbol not in symbols:
+                    symbols.append(symbol)
+
     return symbols[:MAX_STOCKS]
 
 
-def get_history(symbol: str) -> pd.DataFrame:
+def get_prices(symbol):
+
     end = date.today()
     start = end - timedelta(days=420)
-    rows = api_get(
+
+    data = api_get(
         f"eod/{symbol}",
-        {"from": start.isoformat(), "to": end.isoformat(), "period": "d"},
+        {
+            "from": start.isoformat(),
+            "to": end.isoformat(),
+            "period": "d"
+        }
     )
-    if not isinstance(rows, list) or len(rows) < 80:
-        raise ValueError(f"Insufficient daily price history for {symbol}.")
-    frame = pd.DataFrame(rows)
-    required = {"date", "open", "high", "low", "close", "volume"}
-    if not required.issubset(frame.columns):
-        raise ValueError(f"Unexpected price response for {symbol}: missing OHLCV fields.")
-    frame["date"] = pd.to_datetime(frame["date"])
-    for col in ("open", "high", "low", "close", "volume"):
-        frame[col] = pd.to_numeric(frame[col], errors="coerce")
-    frame = frame.dropna(subset=["close", "high", "low", "volume"])
-    return frame.sort_values("date").reset_index(drop=True)
+
+    if not isinstance(data, list) or len(data) < 80:
+        raise ValueError("Insufficient price history")
+
+    df = pd.DataFrame(data)
+
+    required = [
+        "date", "open", "high",
+        "low", "close", "volume"
+    ]
+
+    if not all(col in df.columns for col in required):
+        raise ValueError("Missing OHLCV fields")
+
+    df["date"] = pd.to_datetime(df["date"])
+
+    for col in required[1:]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(
+        subset=["close", "high", "low", "volume"]
+    )
+
+    return df.sort_values("date").reset_index(drop=True)
 
 
-def get_fundamentals(symbol: str) -> dict[str, Any]:
+def get_fundamentals(symbol):
+
     data = api_get(f"fundamentals/{symbol}")
-    if not isinstance(data, dict):
-        return {}
-    return data
+
+    return data if isinstance(data, dict) else {}
 
 
-def as_float(value: Any) -> float | None:
-    try:
-        result = float(value)
-        return result if np.isfinite(result) else None
-    except (TypeError, ValueError):
-        return None
+def get_number(mapping, *keys):
 
-
-def first_number(mapping: dict[str, Any], *keys: str) -> float | None:
     for key in keys:
-        value = as_float(mapping.get(key))
-        if value is not None:
-            return value
+
+        try:
+            value = float(mapping.get(key))
+
+            if np.isfinite(value):
+                return value
+
+        except (TypeError, ValueError):
+            pass
+
     return None
 
 
-def fundamental_score(data: dict[str, Any]) -> tuple[int, list[str]]:
+def fundamental_score(data):
+
     highlights = data.get("Highlights") or {}
     valuation = data.get("Valuation") or {}
-    score = 0
-    reasons: list[str] = []
 
-    roe = first_number(highlights, "ReturnOnEquityTTM", "ReturnOnEquity")
-    margin = first_number(highlights, "ProfitMargin")
-    revenue_growth = first_number(highlights, "RevenueGrowth")
-    earnings_growth = first_number(highlights, "EarningsGrowth")
-    pe = first_number(valuation, "TrailingPE", "ForwardPE")
-    pb = first_number(valuation, "PriceBookMRQ")
+    score = 0
+    reasons = []
+
+    roe = get_number(
+        highlights,
+        "ReturnOnEquityTTM",
+        "ReturnOnEquity"
+    )
+
+    margin = get_number(highlights, "ProfitMargin")
+    revenue = get_number(highlights, "RevenueGrowth")
+    earnings = get_number(highlights, "EarningsGrowth")
+
+    pe = get_number(
+        valuation,
+        "TrailingPE",
+        "ForwardPE"
+    )
+
+    pb = get_number(valuation, "PriceBookMRQ")
 
     if roe is not None and roe >= 15:
         score += 2
-        reasons.append(f"ROE {roe:.1f}%")
+        reasons.append("ROE passed")
+
     if margin is not None and margin >= 10:
         score += 1
-        reasons.append(f"profit margin {margin:.1f}%")
-    if revenue_growth is not None and revenue_growth > 0:
+        reasons.append("Profit margin passed")
+
+    if revenue is not None and revenue > 0:
         score += 1
-        reasons.append("positive revenue growth")
-    if earnings_growth is not None and earnings_growth > 0:
+        reasons.append("Revenue growth passed")
+
+    if earnings is not None and earnings > 0:
         score += 1
-        reasons.append("positive earnings growth")
+        reasons.append("Earnings growth passed")
+
     if pe is not None and 0 < pe <= 35:
         score += 1
-        reasons.append(f"P/E {pe:.1f}")
+        reasons.append("P/E passed")
+
     if pb is not None and 0 < pb <= 6:
         score += 1
-        reasons.append(f"P/B {pb:.1f}")
+        reasons.append("P/B passed")
 
-    # Missing fundamentals are not treated as passing.
     return score, reasons
 
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    close = out["close"]
-    out["sma20"] = close.rolling(20).mean()
-    out["sma50"] = close.rolling(50).mean()
-    out["sma200"] = close.rolling(200).mean()
+def technical_screen(df):
+
+    close = df["close"]
+
+    sma20 = close.rolling(20).mean()
+
     delta = close.diff()
+
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
+
     rs = gain / loss.replace(0, np.nan)
-    out["rsi"] = 100 - (100 / (1 + rs))
-    previous_close = close.shift(1)
-    tr = pd.concat(
-        [
-            out["high"] - out["low"],
-            (out["high"] - previous_close).abs(),
-            (out["low"] - previous_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    out["atr"] = tr.rolling(14).mean()
-    out["avg_volume20"] = out["volume"].rolling(20).mean()
-    out["support20"] = out["low"].rolling(20).min()
-    out["resistance20"] = out["high"].rolling(20).max()
-    return out
 
+    rsi = 100 - (100 / (1 + rs))
 
-def evaluate(
-    symbol: str, prices: pd.DataFrame, fundamentals: dict[str, Any]
-) -> Signal | None:
-    df = add_indicators(prices)
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+    previous = close.shift(1)
 
-    price = float(last["close"])
-    if not np.isfinite(price) or price < MIN_STOCK_PRICE:
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - previous).abs(),
+        (df["low"] - previous).abs()
+    ], axis=1).max(axis=1)
+
+    atr = tr.rolling(14).mean()
+
+    avg_volume = df["volume"].rolling(20).mean()
+
+    support = df["low"].rolling(20).min()
+
+    last = len(df) - 1
+    prev = last - 1
+
+    price = float(close.iloc[last])
+
+    if price < MIN_PRICE:
         return None
 
-    values = [last.get("rsi"), last.get("atr"), last.get("sma20"),
-              last.get("sma50"), last.get("support20"), last.get("avg_volume20")]
-    if any(pd.isna(v) for v in values):
+    values = [
+        rsi.iloc[last],
+        rsi.iloc[prev],
+        atr.iloc[last],
+        sma20.iloc[last],
+        avg_volume.iloc[last],
+        support.iloc[last]
+    ]
+
+    if any(pd.isna(x) for x in values):
         return None
 
-    support = float(last["support20"])
-    atr = float(last["atr"])
-    rsi = float(last["rsi"])
-    avg_volume = float(last["avg_volume20"])
-    if atr <= 0 or avg_volume <= 0:
+    current_rsi = float(rsi.iloc[last])
+    current_atr = float(atr.iloc[last])
+    current_support = float(support.iloc[last])
+
+    if current_atr <= 0:
         return None
 
-    # Reversal setup: price is near its 20-day support, RSI is recovering,
-    # and today's close is above yesterday's close and the 20-day average.
-    near_support = price <= support + (1.8 * atr)
-    rsi_recovering = 35 <= rsi <= 60 and float(prev["rsi"]) < rsi
-    price_reversal = price > float(prev["close"]) and price >= float(last["sma20"])
-    volume_ok = float(last["volume"]) >= 0.8 * avg_volume
-    if not (near_support and rsi_recovering and price_reversal and volume_ok):
+    near_support = (
+        price <= current_support + 1.8 * current_atr
+    )
+
+    rsi_recovery = (
+        35 <= current_rsi <= 60
+        and current_rsi > float(rsi.iloc[prev])
+    )
+
+    price_reversal = (
+        price > float(close.iloc[prev])
+        and price >= float(sma20.iloc[last])
+    )
+
+    volume_ok = (
+        float(df["volume"].iloc[last])
+        >= 0.8 * float(avg_volume.iloc[last])
+    )
+
+    if not all([
+        near_support,
+        rsi_recovery,
+        price_reversal,
+        volume_ok
+    ]):
         return None
 
-    f_score, f_reasons = fundamental_score(fundamentals)
-    if f_score < 3:
+    return {
+        "price": price,
+        "support": current_support,
+        "atr": current_atr,
+        "rsi": current_rsi
+    }
+
+
+def create_signal(symbol, candidate, fundamentals):
+
+    score, reasons = fundamental_score(fundamentals)
+
+    if score < 3:
         return None
+
+    price = candidate["price"]
+    support = candidate["support"]
+    atr = candidate["atr"]
 
     entry = price * 1.002
-    stop = min(support - 0.5 * atr, entry - 1.5 * atr)
+
+    stop = min(
+        support - 0.5 * atr,
+        entry - 1.5 * atr
+    )
+
     risk_per_share = entry - stop
+
     if risk_per_share <= 0:
         return None
 
-    risk_amount = CAPITAL * RISK_PER_TRADE
-    qty_by_risk = int(risk_amount // risk_per_share)
-    qty_by_capital = int(CAPITAL // entry)
-    quantity = max(0, min(qty_by_risk, qty_by_capital))
+    risk_amount = CAPITAL * RISK_PERCENT
+
+    quantity_risk = int(risk_amount // risk_per_share)
+    quantity_capital = int(CAPITAL // entry)
+
+    quantity = min(quantity_risk, quantity_capital)
+
     if quantity < 1:
         return None
 
-    target_1 = entry + (2 * risk_per_share)
-    target_2 = entry + (3 * risk_per_share)
-    reward_risk = (target_1 - entry) / risk_per_share
+    target1 = entry + 2 * risk_per_share
+    target2 = entry + 3 * risk_per_share
 
-    score = f_score + 2  # technical setup passed
-    reason = "; ".join(f_reasons + [
-        f"near support ({support:.2f})",
-        f"RSI recovering ({rsi:.1f})",
-        "reversal/volume conditions passed",
-    ])
-    return Signal(
-        symbol=symbol, price=price, entry=entry, stop_loss=stop,
-        target_1=target_1, target_2=target_2, quantity=quantity,
-        risk_amount=quantity * risk_per_share, reward_risk=reward_risk,
-        score=score, reason=reason,
-    )
-
-
-def send_telegram(message: str) -> None:
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.info("Telegram not configured; skipping alert.")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    response = SESSION.post(
-        url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=20
-    )
-    response.raise_for_status()
+    return {
+        "symbol": symbol,
+        "price": price,
+        "entry": entry,
+        "stop": stop,
+        "target1": target1,
+        "target2": target2,
+        "quantity": quantity,
+        "risk": quantity * risk_per_share,
+        "score": score + 2,
+        "reasons": reasons
+    }
 
 
-def format_signal(signal: Signal) -> str:
-    return (
-        f"📈 SWING SETUP: {signal.symbol}\n"
-        f"Last close: ₹{signal.price:.2f}\n"
-        f"Entry: ₹{signal.entry:.2f}\n"
-        f"Stop loss: ₹{signal.stop_loss:.2f}\n"
-        f"Target 1: ₹{signal.target_1:.2f}\n"
-        f"Target 2: ₹{signal.target_2:.2f}\n"
-        f"Quantity: {signal.quantity} shares\n"
-        f"Estimated risk: ₹{signal.risk_amount:.0f}\n"
-        f"Reward/risk to T1: {signal.reward_risk:.1f}:1\n"
-        f"Setup score: {signal.score}\n"
-        f"Why: {signal.reason}\n"
-        "Research alert only — verify prices and liquidity before trading."
-    )
+def main():
 
-
-def main() -> int:
     if not API_TOKEN:
-        log.error("EODHD_API_TOKEN is not configured.")
-        return 2
-    try:
-        symbols = load_symbols()
-    except Exception as exc:
-        log.error("%s", exc)
+        log.error("EODHD token missing")
         return 2
 
-    log.info("Starting scan for %d symbols; capital ₹%.0f", len(symbols), CAPITAL)
-    signals: list[Signal] = []
-    failures = 0
+    symbols = load_symbols()
 
-    for index, symbol in enumerate(symbols, start=1):
+    stats = Counter()
+    signals = []
+
+    log.info("Starting scan of %d stocks", len(symbols))
+
+    for index, symbol in enumerate(symbols, 1):
+
+        log.info("[%d/%d] %s", index, len(symbols), symbol)
+
         try:
-            log.info("[%d/%d] Scanning %s", index, len(symbols), symbol)
-            prices = get_history(symbol)
-            fundamentals = get_fundamentals(symbol)
-            signal = evaluate(symbol, prices, fundamentals)
-            if signal:
-                signals.append(signal)
-                log.info("Signal found: %s", symbol)
+            prices = get_prices(symbol)
+            stats["price_ok"] += 1
+
         except requests.HTTPError as exc:
-            failures += 1
-            log.warning("%s: API HTTP error: %s", symbol, exc)
-        except Exception as exc:
-            failures += 1
-            log.warning("%s: skipped: %s", symbol, exc)
 
-    signals.sort(key=lambda item: (item.score, item.reward_risk), reverse=True)
+            if exc.response is not None and exc.response.status_code == 404:
+                stats["price_404"] += 1
+                log.warning("%s unavailable (404)", symbol)
+                continue
+
+            log.exception("Price API failure")
+            return 1
+
+        except Exception as exc:
+            log.error("%s price failure: %s", symbol, exc)
+            return 1
+
+        candidate = technical_screen(prices)
+
+        if candidate is None:
+            stats["technical_reject"] += 1
+            continue
+
+        stats["technical_candidates"] += 1
+
+        try:
+            fundamentals = get_fundamentals(symbol)
+            stats["fundamentals_ok"] += 1
+
+        except requests.HTTPError as exc:
+
+            if exc.response is not None and exc.response.status_code == 404:
+                stats["fundamentals_404"] += 1
+                continue
+
+            log.exception("Fundamentals API failure")
+            return 1
+
+        except Exception as exc:
+            log.error("%s fundamentals failure: %s", symbol, exc)
+            return 1
+
+        signal = create_signal(
+            symbol,
+            candidate,
+            fundamentals
+        )
+
+        if signal:
+            signals.append(signal)
+            stats["signals"] += 1
+
+    attempted = len(symbols)
+    successful = stats["price_ok"]
+
+    log.info("========== SCAN SUMMARY ==========")
+
+    log.info("Stocks attempted: %d", attempted)
+    log.info("Price history successful: %d", successful)
+    log.info("Price 404: %d", stats["price_404"])
+    log.info("Technical rejected: %d", stats["technical_reject"])
+    log.info("Technical candidates: %d", stats["technical_candidates"])
+    log.info("Fundamentals checked: %d", stats["fundamentals_ok"])
+    log.info("Fundamentals unavailable: %d", stats["fundamentals_404"])
+    log.info("Signals: %d", len(signals))
+
+    coverage = successful / attempted if attempted else 0
+
+    if coverage < MIN_COVERAGE:
+
+        message = (
+            f"SCANNER DATA WARNING: only {successful}/{attempted} "
+            "stocks returned usable price history. Scan incomplete."
+        )
+
+        log.error(message)
+
+        try:
+            telegram(message)
+        except Exception:
+            log.exception("Telegram failed")
+
+        return 1
+
+    signals.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
     if signals:
-        message = "🇮🇳 INDIAN SWING SCANNER — DAILY RESULTS\n\n"
-        message += "\n\n".join(format_signal(item) for item in signals[:10])
-        print(message)
-        try:
-            send_telegram(message[:3900])
-        except Exception as exc:
-            log.error("Telegram alert failed: %s", exc)
-    else:
-        message = "Indian Swing Scanner: no qualifying setups found today."
-        print(message)
-        try:
-            send_telegram(message)
-        except Exception as exc:
-            log.error("Telegram alert failed: %s", exc)
 
-    log.info("Scan complete. Signals: %d | Failed/skipped: %d", len(signals), failures)
+        message = "INDIAN SWING SCANNER RESULTS\n\n"
+
+        for s in signals[:10]:
+
+            message += (
+                f"{s['symbol']}\n"
+                f"Close: Rs.{s['price']:.2f}\n"
+                f"Entry: Rs.{s['entry']:.2f}\n"
+                f"Stop: Rs.{s['stop']:.2f}\n"
+                f"Target 1: Rs.{s['target1']:.2f}\n"
+                f"Target 2: Rs.{s['target2']:.2f}\n"
+                f"Quantity: {s['quantity']}\n"
+                f"Risk: Rs.{s['risk']:.2f}\n"
+                f"Score: {s['score']}\n\n"
+            )
+
+    else:
+
+        message = (
+            f"No qualifying setups today.\n"
+            f"Data coverage: {successful}/{attempted}"
+        )
+
+    print(message)
+
+    try:
+        telegram(message[:3900])
+    except Exception:
+        log.exception("Telegram delivery failed")
+
+    log.info("Scan completed successfully")
+
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+  
