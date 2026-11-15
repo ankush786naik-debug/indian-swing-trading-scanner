@@ -1,3 +1,33 @@
+
+name: Daily Indian Stock Scanner
+
+on:
+  schedule:
+    - cron: '30 11 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
       - name: Diagnose EODHD India coverage
         env:
           EODHD_API_TOKEN: ${{ secrets.EODHD_API_TOKEN }}
@@ -9,24 +39,28 @@
           token = os.environ["EODHD_API_TOKEN"]
           base = "https://eodhd.com/api"
 
-          r = requests.get(
-              f"{base}/exchanges-list/",
-              params={"api_token": token, "fmt": "json"},
-              timeout=30
-          )
-          print("Exchange list status:", r.status_code)
-
-          if r.ok:
-              for x in r.json():
-                  if "india" in x.get("Country", "").lower():
-                      print("INDIA EXCHANGE:", x)
-
-          for endpoint in ["exchange-symbol-list/NSE", "eod/ABB.NSE"]:
-              r = requests.get(
+          for endpoint in [
+              "exchanges-list/",
+              "exchange-symbol-list/NSE",
+              "eod/ABB.NSE"
+          ]:
+              response = requests.get(
                   f"{base}/{endpoint}",
                   params={"api_token": token, "fmt": "json"},
                   timeout=30
               )
-              print(endpoint, "STATUS:", r.status_code)
-              print(r.text[:500])
+              print(f"\n{endpoint}: HTTP {response.status_code}")
+              print(response.text[:1000])
           PY
+
+      - name: Run stock scanner
+        env:
+          EODHD_API_TOKEN: ${{ secrets.EODHD_API_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CAPITAL: '100000'
+          MIN_STOCK_PRICE: '200'
+          MAX_STOCKS: '500'
+          RISK_PER_TRADE: '0.01'
+        run: python scanner.py
+        
