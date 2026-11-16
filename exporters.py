@@ -37,7 +37,7 @@ def export_csv(data, filename):
         data = [data]
 
     if not data:
-        raise ValueError("No data available for CSV export.")
+    return None
 
     if not all(isinstance(row, dict) for row in data):
         raise ValueError("CSV export requires dictionary rows.")
