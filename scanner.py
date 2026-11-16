@@ -1,15 +1,16 @@
 
 """
-NSE Positional Trading Scanner
+NSE POSITIONAL TRADING SCANNER
 Holding period: approximately 2-3 months.
 
 Signals:
 BUY ENTRY
 HOLD
-EXIT
+EXIT LONG
 SHORT WATCH
+WATCH
 
-Data: TejHQ historical OHLCV
+Data source: TejHQ historical OHLCV
 """
 
 import os
@@ -20,11 +21,13 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
-from Tej_client import TejClient, TejAPIError
+from Tej_client import TejClient
 from exporters import export_csv, export_json
 
 
-# ---------------- CONFIGURATION ----------------
+# ==================================================
+# CONFIGURATION
+# ==================================================
 
 SYMBOL_FILE = "symbols.txt"
 OUTPUT_DIR = "data"
@@ -32,26 +35,18 @@ OUTPUT_DIR = "data"
 EXCHANGE = "nse"
 
 HISTORY_DAYS = 450
-
 MIN_HISTORY = 220
 
-REQUEST_DELAY = 0.15
+REQUEST_DELAY = 0.20
 
 RSI_PERIOD = 14
 ATR_PERIOD = 14
-
-SHORT_EMA = 20
-MEDIUM_EMA = 50
-LONG_EMA = 200
-
 VOLUME_PERIOD = 20
 
-# ATR-based trade planning
 STOP_ATR = 2.5
 TARGET_ONE_R = 2.0
 TARGET_TWO_R = 3.0
 
-# Technical filters
 MIN_ADX = 18
 MIN_BUY_SCORE = 70
 MIN_SHORT_SCORE = 70
@@ -64,17 +59,21 @@ logging.basicConfig(
 )
 
 
-# ---------------- SYMBOL LOADER ----------------
-
+# ==================================================
+# SYMBOL LOADER
+# ==================================================
 
 def load_symbols():
+
     if not os.path.exists(SYMBOL_FILE):
         raise FileNotFoundError("symbols.txt not found.")
 
     symbols = []
 
     with open(SYMBOL_FILE, "r", encoding="utf-8") as file:
+
         for line in file:
+
             symbol = line.strip().upper()
 
             if not symbol or symbol.startswith("#"):
@@ -83,8 +82,11 @@ def load_symbols():
             if symbol in ("SYMBOL", "SYMBOLS", "TICKER"):
                 continue
 
-            # TejHQ receives exchange separately as "nse".
-            # Remove exchange suffixes from the symbol.
+            # Remove exchange prefixes
+            if symbol.startswith("NSE:"):
+                symbol = symbol[4:]
+
+            # Remove exchange suffixes
             for suffix in (".NSE", ".NS"):
                 if symbol.endswith(suffix):
                     symbol = symbol[:-len(suffix)]
@@ -94,10 +96,11 @@ def load_symbols():
                 symbols.append(symbol)
 
     return sorted(set(symbols))
-    
 
 
-# ---------------- DATA NORMALIZATION ----------------
+# ==================================================
+# DATA NORMALIZATION
+# ==================================================
 
 def normalize_data(raw):
 
@@ -108,10 +111,13 @@ def normalize_data(raw):
                 raw = raw[key]
                 break
 
-    if not isinstance(raw, list) or not raw:
+    if not isinstance(raw, (list, tuple)) or len(raw) == 0:
         return None
 
     df = pd.DataFrame(raw)
+
+    if df.empty:
+        return None
 
     df.columns = [
         str(column).lower().strip()
@@ -121,6 +127,7 @@ def normalize_data(raw):
     aliases = {
         "datetime": "date",
         "timestamp": "date",
+        "trading_date": "date",
         "adj_close": "adjusted_close",
     }
 
@@ -136,16 +143,17 @@ def normalize_data(raw):
     ]
 
     if not all(column in df.columns for column in required):
+        logging.warning(
+            "Unexpected OHLCV columns received: %s",
+            list(df.columns)
+        )
         return None
 
     df["date"] = pd.to_datetime(
         df["date"],
         errors="coerce",
         utc=True
-    )
-
-    # Convert UTC dates to date-only values.
-    df["date"] = df["date"].dt.tz_convert(None)
+    ).dt.tz_convert(None)
 
     for column in required[1:]:
         df[column] = pd.to_numeric(
@@ -156,12 +164,18 @@ def normalize_data(raw):
     df = df.dropna(subset=required)
 
     df = df.sort_values("date")
-    df = df.drop_duplicates(subset="date")
+
+    df = df.drop_duplicates(
+        subset="date",
+        keep="last"
+    )
 
     return df.reset_index(drop=True)
 
 
-# ---------------- TECHNICAL INDICATORS ----------------
+# ==================================================
+# TECHNICAL INDICATORS
+# ==================================================
 
 def calculate_indicators(df):
 
@@ -210,7 +224,21 @@ def calculate_indicators(df):
 
     df["rsi"] = 100 - (100 / (1 + rs))
 
-    df["rsi"] = df["rsi"].fillna(100)
+    # Handle stocks with no losses or no gains
+    df.loc[
+        (avg_loss == 0) & (avg_gain > 0),
+        "rsi"
+    ] = 100
+
+    df.loc[
+        (avg_gain == 0) & (avg_loss > 0),
+        "rsi"
+    ] = 0
+
+    df.loc[
+        (avg_gain == 0) & (avg_loss == 0),
+        "rsi"
+    ] = 50
 
     # MACD
     ema12 = close.ewm(
@@ -303,7 +331,7 @@ def calculate_indicators(df):
     df["plus_di"] = plus_di
     df["minus_di"] = minus_di
 
-    # Volume confirmation
+    # Volume
     df["volume_avg20"] = volume.rolling(
         VOLUME_PERIOD
     ).mean()
@@ -312,14 +340,21 @@ def calculate_indicators(df):
         volume / df["volume_avg20"].replace(0, np.nan)
     )
 
-    # Price structure
-    df["resistance20"] = high.shift(1).rolling(20).max()
-    df["support20"] = low.shift(1).rolling(20).min()
+    # Previous 20-day support and resistance
+    df["resistance20"] = (
+        high.shift(1).rolling(20).max()
+    )
+
+    df["support20"] = (
+        low.shift(1).rolling(20).min()
+    )
 
     return df
 
 
-# ---------------- WEEKLY TREND ----------------
+# ==================================================
+# WEEKLY TREND
+# ==================================================
 
 def calculate_weekly_trend(df):
 
@@ -367,7 +402,9 @@ def calculate_weekly_trend(df):
     return "SIDEWAYS"
 
 
-# ---------------- SIGNAL ENGINE ----------------
+# ==================================================
+# SIGNAL ENGINE
+# ==================================================
 
 def analyze_stock(symbol, df):
 
@@ -377,7 +414,6 @@ def analyze_stock(symbol, df):
     df = calculate_indicators(df)
 
     current = df.iloc[-1]
-    previous = df.iloc[-2]
 
     price = float(current["close"])
     atr = float(current["atr"])
@@ -390,11 +426,15 @@ def analyze_stock(symbol, df):
 
     weekly_trend = calculate_weekly_trend(df)
 
+    if weekly_trend == "INSUFFICIENT HISTORY":
+        return None
+
     bullish_score = 0
     bearish_score = 0
+
     reasons = []
 
-    # -------- BULLISH CONDITIONS --------
+    # BULLISH CONDITIONS
 
     if price > current["ema200"]:
         bullish_score += 20
@@ -416,10 +456,12 @@ def analyze_stock(symbol, df):
         bullish_score += 10
         reasons.append("MACD bullish")
 
-    if current["adx"] >= MIN_ADX:
-        if current["plus_di"] > current["minus_di"]:
-            bullish_score += 10
-            reasons.append("Strong positive trend")
+    if (
+        current["adx"] >= MIN_ADX
+        and current["plus_di"] > current["minus_di"]
+    ):
+        bullish_score += 10
+        reasons.append("Strong positive trend")
 
     if current["volume_ratio"] >= 1.3:
         bullish_score += 10
@@ -429,7 +471,7 @@ def analyze_stock(symbol, df):
         bullish_score += 10
         reasons.append("Weekly trend bullish")
 
-    # -------- BEARISH CONDITIONS --------
+    # BEARISH CONDITIONS
 
     if price < current["ema200"]:
         bearish_score += 20
@@ -446,9 +488,11 @@ def analyze_stock(symbol, df):
     if current["macd"] < current["macd_signal"]:
         bearish_score += 10
 
-    if current["adx"] >= MIN_ADX:
-        if current["minus_di"] > current["plus_di"]:
-            bearish_score += 10
+    if (
+        current["adx"] >= MIN_ADX
+        and current["minus_di"] > current["plus_di"]
+    ):
+        bearish_score += 10
 
     if current["volume_ratio"] >= 1.3:
         bearish_score += 10
@@ -456,7 +500,7 @@ def analyze_stock(symbol, df):
     if weekly_trend == "BEARISH":
         bearish_score += 10
 
-    # -------- ENTRY / EXIT LEVELS --------
+    # ENTRY AND EXIT LEVELS
 
     long_stop = price - STOP_ATR * atr
     long_risk = price - long_stop
@@ -470,32 +514,37 @@ def analyze_stock(symbol, df):
     short_target1 = price - TARGET_ONE_R * short_risk
     short_target2 = price - TARGET_TWO_R * short_risk
 
-    resistance = float(current["resistance20"])
-    support = float(current["support20"])
+    resistance = current["resistance20"]
+    support = current["support20"]
 
     bullish_breakout = (
-        price > resistance
+        pd.notna(resistance)
+        and price > resistance
         and current["volume_ratio"] >= 1.3
     )
 
     bearish_breakdown = (
-        price < support
+        pd.notna(support)
+        and price < support
         and current["volume_ratio"] >= 1.3
     )
 
     signal = "WATCH"
+
     entry_price = None
     stop_loss = None
     target1 = None
     target2 = None
 
-    # BUY
+    # BUY ENTRY
+
     if (
         bullish_score >= MIN_BUY_SCORE
         and weekly_trend == "BULLISH"
     ):
 
         signal = "BUY ENTRY"
+
         entry_price = price
         stop_loss = long_stop
         target1 = long_target1
@@ -504,7 +553,8 @@ def analyze_stock(symbol, df):
         if bullish_breakout:
             reasons.append("20-day resistance breakout")
 
-    # EXIT for long positions
+    # EXIT LONG
+
     elif (
         price < current["ema50"]
         and current["macd"] < current["macd_signal"]
@@ -512,9 +562,11 @@ def analyze_stock(symbol, df):
     ):
 
         signal = "EXIT LONG"
+
         reasons.append("Trend deterioration")
 
     # SHORT WATCH
+
     elif (
         bearish_score >= MIN_SHORT_SCORE
         and weekly_trend == "BEARISH"
@@ -522,6 +574,7 @@ def analyze_stock(symbol, df):
     ):
 
         signal = "SHORT WATCH"
+
         entry_price = price
         stop_loss = short_stop
         target1 = short_target1
@@ -530,6 +583,7 @@ def analyze_stock(symbol, df):
         reasons.append("20-day support breakdown")
 
     # HOLD
+
     elif (
         price > current["ema50"]
         and weekly_trend == "BULLISH"
@@ -537,48 +591,204 @@ def analyze_stock(symbol, df):
     ):
 
         signal = "HOLD"
+
         reasons.append("Existing bullish trend intact")
 
-    # -------- OUTPUT --------
+    # OUTPUT
 
     return {
         "symbol": symbol,
         "date": str(current["date"].date()),
         "signal": signal,
         "price": round(price, 2),
+
         "entry_price": (
             round(entry_price, 2)
             if entry_price is not None else None
         ),
+
         "stop_loss": (
             round(stop_loss, 2)
             if stop_loss is not None else None
         ),
+
         "target_1": (
             round(target1, 2)
             if target1 is not None else None
         ),
+
         "target_2": (
             round(target2, 2)
             if target2 is not None else None
         ),
+
         "rsi": round(float(current["rsi"]), 2),
-        "adx": round(float(current["adx"]), 2),
+        "adx": (
+            round(float(current["adx"]), 2)
+            if pd.notna(current["adx"]) else None
+        ),
+
         "atr": round(atr, 2),
+
         "volume_ratio": (
             round(float(current["volume_ratio"]), 2)
             if np.isfinite(current["volume_ratio"])
             else None
         ),
+
         "bullish_score": bullish_score,
         "bearish_score": bearish_score,
+
         "weekly_trend": weekly_trend,
+
         "reasons": "; ".join(reasons),
+
         "holding_period": "2-3 months"
     }
 
 
-# ---------------- MAIN SCANNER ----------------
+# ==================================================
+# EXPORT RESULTS
+# ==================================================
+
+def save_results(results, failures, total_symbols):
+
+    if not results:
+        logging.warning(
+            "No stocks passed the minimum analysis requirements."
+        )
+
+        export_json(
+            failures,
+            "nse_scan_failures.json"
+        )
+
+        return
+
+    result_df = pd.DataFrame(results)
+
+    result_df = result_df.sort_values(
+        by=["bullish_score", "bearish_score"],
+        ascending=False
+    )
+
+    # All stocks
+    export_csv(
+        result_df.to_dict("records"),
+        "nse_scanner_all.csv"
+    )
+
+    export_json(
+        result_df.to_dict("records"),
+        "nse_scanner_all.json"
+    )
+
+    # BUY
+    buys = result_df[
+        result_df["signal"] == "BUY ENTRY"
+    ]
+
+    export_csv(
+        buys.to_dict("records"),
+        "nse_buy_signals.csv"
+    )
+
+    # EXIT
+    exits = result_df[
+        result_df["signal"] == "EXIT LONG"
+    ]
+
+    export_csv(
+        exits.to_dict("records"),
+        "nse_exit_signals.csv"
+    )
+
+    # SHORT WATCH
+    shorts = result_df[
+        result_df["signal"] == "SHORT WATCH"
+    ]
+
+    export_csv(
+        shorts.to_dict("records"),
+        "nse_short_watch.csv"
+    )
+
+    # HOLD
+    holds = result_df[
+        result_df["signal"] == "HOLD"
+    ]
+
+    export_csv(
+        holds.to_dict("records"),
+        "nse_hold_signals.csv"
+    )
+
+    # Failures
+    export_json(
+        failures,
+        "nse_scan_failures.json"
+    )
+
+    # REPORT
+    print("\n========== NSE SCANNER REPORT ==========")
+
+    print(f"Symbols loaded: {total_symbols}")
+    print(f"Successful analysis: {len(results)}")
+    print(f"Failed symbols: {len(failures)}")
+
+    print(f"BUY ENTRY: {len(buys)}")
+    print(f"HOLD: {len(holds)}")
+    print(f"EXIT LONG: {len(exits)}")
+    print(f"SHORT WATCH: {len(shorts)}")
+
+    print("\n========== TOP BUY CANDIDATES ==========")
+
+    if not buys.empty:
+
+        print(
+            buys[
+                [
+                    "symbol",
+                    "price",
+                    "entry_price",
+                    "stop_loss",
+                    "target_1",
+                    "target_2",
+                    "bullish_score"
+                ]
+            ].head(20).to_string(index=False)
+        )
+
+    else:
+        print("No BUY ENTRY signals today.")
+
+    print("\n========== TOP SHORT WATCH ==========")
+
+    if not shorts.empty:
+
+        print(
+            shorts[
+                [
+                    "symbol",
+                    "price",
+                    "entry_price",
+                    "stop_loss",
+                    "target_1",
+                    "target_2",
+                    "bearish_score"
+                ]
+            ].head(20).to_string(index=False)
+        )
+
+    else:
+        print("No SHORT WATCH signals today.")
+
+    print("\nFiles saved in data/ directory.")
+
+
+# ==================================================
+# MAIN SCANNER
+# ==================================================
 
 def run_scanner():
 
@@ -600,6 +810,12 @@ def run_scanner():
         days=HISTORY_DAYS
     )
 
+    logging.info(
+        "Historical period: %s to %s",
+        start_date,
+        end_date
+    )
+
     try:
 
         for index, symbol in enumerate(symbols, start=1):
@@ -613,147 +829,86 @@ def run_scanner():
                     symbol
                 )
 
+                # Explicit API arguments
                 raw = client.get_ohlcv(
-                    symbol,
-                    EXCHANGE,
-                    start_date.isoformat(),
-                    end_date.isoformat()
+                    symbol=symbol,
+                    exchange=EXCHANGE,
+                    from_date=start_date.isoformat(),
+                    to_date=end_date.isoformat()
                 )
 
                 df = normalize_data(raw)
 
                 if df is None:
+
                     failures.append({
                         "symbol": symbol,
                         "error": "No valid OHLCV data"
                     })
+
+                    logging.warning(
+                        "%s returned no valid OHLCV data",
+                        symbol
+                    )
+
+                    continue
+
+                if len(df) < MIN_HISTORY:
+
+                    failures.append({
+                        "symbol": symbol,
+                        "error": (
+                            f"Only {len(df)} records; "
+                            f"minimum required is {MIN_HISTORY}"
+                        )
+                    })
+
                     continue
 
                 result = analyze_stock(symbol, df)
 
-                if result:
+                if result is not None:
                     results.append(result)
+
                 else:
+
                     failures.append({
                         "symbol": symbol,
-                        "error": "Insufficient history or indicators"
+                        "error": "Insufficient indicator history"
                     })
 
             except Exception as error:
 
-                logging.warning(
+                error_message = str(error)
+
+                logging.exception(
                     "%s failed: %s",
                     symbol,
-                    error
+                    error_message
                 )
 
                 failures.append({
                     "symbol": symbol,
-                    "error": str(error)
+                    "error": error_message
                 })
 
             time.sleep(REQUEST_DELAY)
 
     finally:
+
         client.close()
 
-    if not results:
-        logging.warning("No valid scanner results.")
-        return
-
-    result_df = pd.DataFrame(results)
-
-    result_df = result_df.sort_values(
-        by=["bullish_score", "bearish_score"],
-        ascending=False
-    )
-
-    # Save all results
-    export_csv(
-        result_df.to_dict("records"),
-        "nse_scanner_all.csv"
-    )
-
-    export_json(
-        result_df.to_dict("records"),
-        "nse_scanner_all.json"
-    )
-
-    # Save BUY signals
-    buys = result_df[
-        result_df["signal"] == "BUY ENTRY"
-    ]
-
-    export_csv(
-        buys.to_dict("records"),
-        "nse_buy_signals.csv"
-    )
-
-    # Save EXIT signals
-    exits = result_df[
-        result_df["signal"] == "EXIT LONG"
-    ]
-
-    export_csv(
-        exits.to_dict("records"),
-        "nse_exit_signals.csv"
-    )
-
-    # Save short watchlist
-    shorts = result_df[
-        result_df["signal"] == "SHORT WATCH"
-    ]
-
-    export_csv(
-        shorts.to_dict("records"),
-        "nse_short_watch.csv"
-    )
-
-    # Save HOLD signals
-    holds = result_df[
-        result_df["signal"] == "HOLD"
-    ]
-
-    export_csv(
-        holds.to_dict("records"),
-        "nse_hold_signals.csv"
-    )
-
-    export_json(
+    save_results(
+        results,
         failures,
-        "nse_scan_failures.json"
+        len(symbols)
     )
 
-    print("\n========== NSE SCANNER REPORT ==========")
 
-    print(f"Symbols loaded: {len(symbols)}")
-    print(f"Successful analysis: {len(results)}")
-    print(f"Failed symbols: {len(failures)}")
-
-    print(f"BUY ENTRY: {len(buys)}")
-    print(f"HOLD: {len(holds)}")
-    print(f"EXIT LONG: {len(exits)}")
-    print(f"SHORT WATCH: {len(shorts)}")
-
-    print("\nTOP BUY CANDIDATES")
-
-    print(
-        buys[
-            [
-                "symbol",
-                "price",
-                "entry_price",
-                "stop_loss",
-                "target_1",
-                "target_2",
-                "bullish_score"
-            ]
-        ].head(20).to_string(index=False)
-    )
-
-    print("\nFiles saved in data/ directory.")
-
+# ==================================================
+# START
+# ==================================================
 
 if __name__ == "__main__":
     run_scanner()
-    
+        
