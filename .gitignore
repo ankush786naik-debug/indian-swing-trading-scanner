@@ -1,27 +1,11 @@
 
-# Environment variables and secrets
 .env
-.env.*
-!.env.example
-
-# Python cache files
-__pycache__/
-*.py[cod]
-*.pyo
-
-# Virtual environments
 .venv/
 venv/
-env/
-
-# Logs
-*.log
-
-# Temporary files
-*.tmp
-*.bak
-.DS_Store
-
-# IDE settings
-.vscode/
+__pycache__/
+*.pyc
+.pytest_cache/
 .idea/
+.vscode/
+data/*
+!data/.gitkeep
