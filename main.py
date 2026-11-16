@@ -4,7 +4,7 @@ import json
 
 from Tej_client import TejClient, TejAPIError
 from exporters import export_json, export_csv
-from app.config import DEFAULT_EXCHANGE
+from config import DEFAULT_EXCHANGE
 
 
 def add_output_options(command):
