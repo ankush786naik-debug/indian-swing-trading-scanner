@@ -2,8 +2,8 @@
 import argparse
 import json
 
-from app.tej_client import TejClient, TejAPIError
-from app.exporters import export_json, export_csv
+from Tej_client import TejClient, TejAPIError
+from exporters import export_json, export_csv
 from app.config import DEFAULT_EXCHANGE
 
 
