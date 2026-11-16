@@ -7,81 +7,75 @@ from app.exporters import export_json, export_csv
 from app.config import DEFAULT_EXCHANGE
 
 
+def add_output_options(command):
+    command.add_argument(
+        "--format",
+        choices=["json", "csv"],
+        default="json"
+    )
+    command.add_argument("--output", default=None)
+
+
 def main():
 
     parser = argparse.ArgumentParser(
         description="TejHQ NSE Market Data Downloader"
     )
 
-    subparsers = parser.add_subparsers(
+    commands = parser.add_subparsers(
         dest="command",
         required=True
     )
 
-    # Historical prices
-    ohlcv = subparsers.add_parser("ohlcv")
-    ohlcv.add_argument("symbol")
-    ohlcv.add_argument("--exchange", default=DEFAULT_EXCHANGE)
-    ohlcv.add_argument("--from-date")
-    ohlcv.add_argument("--to-date")
-    ohlcv.add_argument("--adjusted", action="store_true")
+    p = commands.add_parser("ohlcv")
+    p.add_argument("symbol")
+    p.add_argument("--exchange", default=DEFAULT_EXCHANGE)
+    p.add_argument("--from-date")
+    p.add_argument("--to-date")
+    p.add_argument("--adjusted", action="store_true")
+    add_output_options(p)
 
-    # Market snapshot
-    snapshot = subparsers.add_parser("snapshot")
-    snapshot.add_argument("--date", required=True)
-    snapshot.add_argument("--exchange", default=DEFAULT_EXCHANGE)
+    p = commands.add_parser("snapshot")
+    p.add_argument("--date", required=True)
+    p.add_argument("--exchange", default=DEFAULT_EXCHANGE)
+    add_output_options(p)
 
-    # Corporate actions
-    actions = subparsers.add_parser("actions")
-    actions.add_argument("symbol")
+    p = commands.add_parser("actions")
+    p.add_argument("symbol")
+    add_output_options(p)
 
-    # Delivery data
-    delivery = subparsers.add_parser("delivery")
-    delivery.add_argument("symbol")
-    delivery.add_argument("--exchange", default=DEFAULT_EXCHANGE)
-    delivery.add_argument("--from-date")
-    delivery.add_argument("--to-date")
+    p = commands.add_parser("delivery")
+    p.add_argument("symbol")
+    p.add_argument("--exchange", default=DEFAULT_EXCHANGE)
+    p.add_argument("--from-date")
+    p.add_argument("--to-date")
+    add_output_options(p)
 
-    # Symbol history
-    symbols = subparsers.add_parser("symbols")
-    symbols.add_argument("--exchange", default=DEFAULT_EXCHANGE)
-    symbols.add_argument("--symbol")
-    symbols.add_argument("--isin")
-
-    # Output format
-    parser.add_argument(
-        "--format",
-        choices=["json", "csv"],
-        default="json"
-    )
-
-    parser.add_argument(
-        "--output",
-        default=None
-    )
+    p = commands.add_parser("symbols")
+    p.add_argument("--exchange", default=DEFAULT_EXCHANGE)
+    p.add_argument("--symbol")
+    p.add_argument("--isin")
+    add_output_options(p)
 
     args = parser.parse_args()
-
     client = TejClient()
 
     try:
 
         if args.command == "ohlcv":
 
-            if args.adjusted:
-                data = client.get_adjusted(
-                    args.symbol,
-                    args.exchange,
-                    args.from_date,
-                    args.to_date
-                )
-            else:
-                data = client.get_ohlcv(
-                    args.symbol,
-                    args.exchange,
-                    args.from_date,
-                    args.to_date
-                )
+            method = (
+                client.get_adjusted
+                if args.adjusted
+                else client.get_ohlcv
+            )
+
+            data = method(
+                args.symbol,
+                args.exchange,
+                args.from_date,
+                args.to_date
+            )
 
         elif args.command == "snapshot":
 
@@ -92,9 +86,7 @@ def main():
 
         elif args.command == "actions":
 
-            data = client.get_actions(
-                args.symbol
-            )
+            data = client.get_actions(args.symbol)
 
         elif args.command == "delivery":
 
@@ -117,25 +109,21 @@ def main():
 
             filename = args.output
 
-            if args.format == "json":
-                if not filename.endswith(".json"):
-                    filename += ".json"
-
-                filepath = export_json(
-                    data,
-                    filename
+            if args.format == "csv":
+                filename = (
+                    filename if filename.endswith(".csv")
+                    else filename + ".csv"
                 )
+                filepath = export_csv(data, filename)
 
             else:
-                if not filename.endswith(".csv"):
-                    filename += ".csv"
-
-                filepath = export_csv(
-                    data,
-                    filename
+                filename = (
+                    filename if filename.endswith(".json")
+                    else filename + ".json"
                 )
+                filepath = export_json(data, filename)
 
-            print(f"Saved: {filepath}")
+            print(f"Export successful: {filepath}")
 
         else:
 
@@ -147,11 +135,10 @@ def main():
             ))
 
         if isinstance(data, list):
-            print(f"\nTotal records: {len(data)}")
+            print(f"Total records: {len(data)}")
 
     except (TejAPIError, ValueError) as error:
-
-        print(f"ERROR: {error}")
+        print(f"API ERROR: {error}")
 
     finally:
         client.close()
@@ -159,4 +146,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-          
+    
