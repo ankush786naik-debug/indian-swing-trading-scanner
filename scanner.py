@@ -1,566 +1,762 @@
 
-#!/usr/bin/env python3
+"""
+NSE Positional Trading Scanner
+Holding period: approximately 2-3 months.
+
+Signals:
+BUY ENTRY
+HOLD
+EXIT
+SHORT WATCH
+
+Data: TejHQ historical OHLCV
+"""
 
 import os
-import sys
 import time
 import logging
 from datetime import date, timedelta
-from collections import Counter
 
-import requests
-import pandas as pd
 import numpy as np
-from dotenv import load_dotenv
+import pandas as pd
 
-load_dotenv()
+from Tej_client import TejClient, TejAPIError
+from exporters import export_csv, export_json
 
-# CONFIGURATION
-API_TOKEN = os.getenv("EODHD_API_TOKEN", "").strip()
-BASE_URL = "https://eodhd.com/api"
 
-CAPITAL = float(os.getenv("CAPITAL", "100000"))
-MIN_PRICE = float(os.getenv("MIN_STOCK_PRICE", "200"))
-MAX_STOCKS = int(os.getenv("MAX_STOCKS", "500"))
-RISK_PERCENT = float(os.getenv("RISK_PER_TRADE", "0.01"))
+# ---------------- CONFIGURATION ----------------
 
-API_DELAY = float(os.getenv("API_MIN_INTERVAL_SEC", "1.1"))
-MAX_RETRIES = int(os.getenv("API_MAX_RETRIES", "4"))
-MIN_COVERAGE = float(os.getenv("MIN_DATA_COVERAGE", "0.80"))
+SYMBOL_FILE = "symbols.txt"
+OUTPUT_DIR = "data"
 
-SYMBOL_FILE = os.getenv("SYMBOLS_FILE", "symbols.txt")
+EXCHANGE = "nse"
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+HISTORY_DAYS = 450
+
+MIN_HISTORY = 220
+
+REQUEST_DELAY = 0.15
+
+RSI_PERIOD = 14
+ATR_PERIOD = 14
+
+SHORT_EMA = 20
+MEDIUM_EMA = 50
+LONG_EMA = 200
+
+VOLUME_PERIOD = 20
+
+# ATR-based trade planning
+STOP_ATR = 2.5
+TARGET_ONE_R = 2.0
+TARGET_TWO_R = 3.0
+
+# Technical filters
+MIN_ADX = 18
+MIN_BUY_SCORE = 70
+MIN_SHORT_SCORE = 70
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-log = logging.getLogger("scanner")
 
-session = requests.Session()
-session.headers.update({"User-Agent": "IndianSwingScanner/2.0"})
-
-last_request = 0.0
-
-
-def telegram(message):
-
-    if not BOT_TOKEN or not CHAT_ID:
-        log.info("Telegram not configured")
-        return
-
-    response = session.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        data={
-            "chat_id": CHAT_ID,
-            "text": message
-        },
-        timeout=20
-    )
-
-    response.raise_for_status()
-
-
-def api_get(path, params=None):
-
-    global last_request
-
-    if not API_TOKEN:
-        raise RuntimeError("EODHD_API_TOKEN missing")
-
-    query = dict(params or {})
-    query.update({
-        "api_token": API_TOKEN,
-        "fmt": "json"
-    })
-
-    url = f"{BASE_URL}/{path}"
-
-    for attempt in range(MAX_RETRIES + 1):
-
-        wait = API_DELAY - (time.monotonic() - last_request)
-
-        if wait > 0:
-            time.sleep(wait)
-
-        try:
-            response = session.get(
-                url,
-                params=query,
-                timeout=45
-            )
-            last_request = time.monotonic()
-
-        except requests.RequestException:
-
-            if attempt == MAX_RETRIES:
-                raise
-
-            delay = min(2 ** attempt, 30)
-            log.warning("Network retry in %s seconds", delay)
-            time.sleep(delay)
-            continue
-
-        if response.status_code == 429 or response.status_code >= 500:
-
-            if attempt == MAX_RETRIES:
-                raise RuntimeError(
-                    f"API unavailable: HTTP {response.status_code}"
-                )
-
-            retry_after = response.headers.get("Retry-After")
-
-            try:
-                delay = max(float(retry_after), 2)
-            except (TypeError, ValueError):
-                delay = min(2 ** (attempt + 1), 30)
-
-            log.warning("HTTP %s. Retry in %s seconds",
-                        response.status_code, delay)
-
-            time.sleep(delay)
-            continue
-
-        if response.status_code in (401, 403):
-            raise RuntimeError(
-                f"Authentication/subscription error: HTTP {response.status_code}"
-            )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        if isinstance(data, dict) and data.get("error"):
-            raise RuntimeError(str(data["error"]))
-
-        return data
-
-    raise RuntimeError("API request failed")
-
+# ---------------- SYMBOL LOADER ----------------
 
 def load_symbols():
 
     if not os.path.exists(SYMBOL_FILE):
-        raise FileNotFoundError(SYMBOL_FILE)
+        raise FileNotFoundError(
+            "symbols.txt not found."
+        )
 
     symbols = []
 
-    with open(SYMBOL_FILE, encoding="utf-8") as file:
+    with open(
+        SYMBOL_FILE,
+        "r",
+        encoding="utf-8"
+    ) as file:
 
         for line in file:
 
             symbol = line.strip().upper()
 
-            if symbol and not symbol.startswith("#"):
-                if symbol not in symbols:
-                    symbols.append(symbol)
+            if not symbol:
+                continue
 
-    return symbols[:MAX_STOCKS]
+            if symbol.startswith("#"):
+                continue
+
+            # Ignore headers
+            if symbol in ("SYMBOL", "SYMBOLS", "TICKER"):
+                continue
+
+            symbols.append(symbol)
+
+    return sorted(set(symbols))
 
 
-def get_prices(symbol):
+# ---------------- DATA NORMALIZATION ----------------
 
-    end = date.today()
-    start = end - timedelta(days=420)
+def normalize_data(raw):
 
-    data = api_get(
-        f"eod/{symbol}",
-        {
-            "from": start.isoformat(),
-            "to": end.isoformat(),
-            "period": "d"
-        }
-    )
+    if isinstance(raw, dict):
 
-    if not isinstance(data, list) or len(data) < 80:
-        raise ValueError("Insufficient price history")
+        for key in ("data", "historical", "results"):
+            if isinstance(raw.get(key), list):
+                raw = raw[key]
+                break
 
-    df = pd.DataFrame(data)
+    if not isinstance(raw, list) or not raw:
+        return None
 
-    required = [
-        "date", "open", "high",
-        "low", "close", "volume"
+    df = pd.DataFrame(raw)
+
+    df.columns = [
+        str(column).lower().strip()
+        for column in df.columns
     ]
 
-    if not all(col in df.columns for col in required):
-        raise ValueError("Missing OHLCV fields")
-
-    df["date"] = pd.to_datetime(df["date"])
-
-    for col in required[1:]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df = df.dropna(
-        subset=["close", "high", "low", "volume"]
-    )
-
-    return df.sort_values("date").reset_index(drop=True)
-
-
-def get_fundamentals(symbol):
-
-    data = api_get(f"fundamentals/{symbol}")
-
-    return data if isinstance(data, dict) else {}
-
-
-def get_number(mapping, *keys):
-
-    for key in keys:
-
-        try:
-            value = float(mapping.get(key))
-
-            if np.isfinite(value):
-                return value
-
-        except (TypeError, ValueError):
-            pass
-
-    return None
-
-
-def fundamental_score(data):
-
-    highlights = data.get("Highlights") or {}
-    valuation = data.get("Valuation") or {}
-
-    score = 0
-    reasons = []
-
-    roe = get_number(
-        highlights,
-        "ReturnOnEquityTTM",
-        "ReturnOnEquity"
-    )
-
-    margin = get_number(highlights, "ProfitMargin")
-    revenue = get_number(highlights, "RevenueGrowth")
-    earnings = get_number(highlights, "EarningsGrowth")
-
-    pe = get_number(
-        valuation,
-        "TrailingPE",
-        "ForwardPE"
-    )
-
-    pb = get_number(valuation, "PriceBookMRQ")
-
-    if roe is not None and roe >= 15:
-        score += 2
-        reasons.append("ROE passed")
-
-    if margin is not None and margin >= 10:
-        score += 1
-        reasons.append("Profit margin passed")
-
-    if revenue is not None and revenue > 0:
-        score += 1
-        reasons.append("Revenue growth passed")
-
-    if earnings is not None and earnings > 0:
-        score += 1
-        reasons.append("Earnings growth passed")
-
-    if pe is not None and 0 < pe <= 35:
-        score += 1
-        reasons.append("P/E passed")
-
-    if pb is not None and 0 < pb <= 6:
-        score += 1
-        reasons.append("P/B passed")
-
-    return score, reasons
-
-
-def technical_screen(df):
-
-    close = df["close"]
-
-    sma20 = close.rolling(20).mean()
-
-    delta = close.diff()
-
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-
-    rs = gain / loss.replace(0, np.nan)
-
-    rsi = 100 - (100 / (1 + rs))
-
-    previous = close.shift(1)
-
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - previous).abs(),
-        (df["low"] - previous).abs()
-    ], axis=1).max(axis=1)
-
-    atr = tr.rolling(14).mean()
-
-    avg_volume = df["volume"].rolling(20).mean()
-
-    support = df["low"].rolling(20).min()
-
-    last = len(df) - 1
-    prev = last - 1
-
-    price = float(close.iloc[last])
-
-    if price < MIN_PRICE:
-        return None
-
-    values = [
-        rsi.iloc[last],
-        rsi.iloc[prev],
-        atr.iloc[last],
-        sma20.iloc[last],
-        avg_volume.iloc[last],
-        support.iloc[last]
-    ]
-
-    if any(pd.isna(x) for x in values):
-        return None
-
-    current_rsi = float(rsi.iloc[last])
-    current_atr = float(atr.iloc[last])
-    current_support = float(support.iloc[last])
-
-    if current_atr <= 0:
-        return None
-
-    near_support = (
-        price <= current_support + 1.8 * current_atr
-    )
-
-    rsi_recovery = (
-        35 <= current_rsi <= 60
-        and current_rsi > float(rsi.iloc[prev])
-    )
-
-    price_reversal = (
-        price > float(close.iloc[prev])
-        and price >= float(sma20.iloc[last])
-    )
-
-    volume_ok = (
-        float(df["volume"].iloc[last])
-        >= 0.8 * float(avg_volume.iloc[last])
-    )
-
-    if not all([
-        near_support,
-        rsi_recovery,
-        price_reversal,
-        volume_ok
-    ]):
-        return None
-
-    return {
-        "price": price,
-        "support": current_support,
-        "atr": current_atr,
-        "rsi": current_rsi
+    aliases = {
+        "datetime": "date",
+        "timestamp": "date",
+        "adj_close": "adjusted_close",
     }
 
+    df = df.rename(columns=aliases)
 
-def create_signal(symbol, candidate, fundamentals):
+    required = [
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+    ]
 
-    score, reasons = fundamental_score(fundamentals)
-
-    if score < 3:
+    if not all(column in df.columns for column in required):
         return None
 
-    price = candidate["price"]
-    support = candidate["support"]
-    atr = candidate["atr"]
-
-    entry = price * 1.002
-
-    stop = min(
-        support - 0.5 * atr,
-        entry - 1.5 * atr
+    df["date"] = pd.to_datetime(
+        df["date"],
+        errors="coerce",
+        utc=True
     )
 
-    risk_per_share = entry - stop
+    # Convert UTC dates to date-only values.
+    df["date"] = df["date"].dt.tz_convert(None)
 
-    if risk_per_share <= 0:
+    for column in required[1:]:
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce"
+        )
+
+    df = df.dropna(subset=required)
+
+    df = df.sort_values("date")
+    df = df.drop_duplicates(subset="date")
+
+    return df.reset_index(drop=True)
+
+
+# ---------------- TECHNICAL INDICATORS ----------------
+
+def calculate_indicators(df):
+
+    df = df.copy()
+
+    close = df["close"]
+    high = df["high"]
+    low = df["low"]
+    volume = df["volume"]
+
+    # EMA
+    df["ema20"] = close.ewm(
+        span=20,
+        adjust=False
+    ).mean()
+
+    df["ema50"] = close.ewm(
+        span=50,
+        adjust=False
+    ).mean()
+
+    df["ema200"] = close.ewm(
+        span=200,
+        adjust=False
+    ).mean()
+
+    # RSI
+    delta = close.diff()
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(
+        alpha=1 / RSI_PERIOD,
+        adjust=False,
+        min_periods=RSI_PERIOD
+    ).mean()
+
+    avg_loss = loss.ewm(
+        alpha=1 / RSI_PERIOD,
+        adjust=False,
+        min_periods=RSI_PERIOD
+    ).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    df["rsi"] = 100 - (100 / (1 + rs))
+
+    df["rsi"] = df["rsi"].fillna(100)
+
+    # MACD
+    ema12 = close.ewm(
+        span=12,
+        adjust=False
+    ).mean()
+
+    ema26 = close.ewm(
+        span=26,
+        adjust=False
+    ).mean()
+
+    df["macd"] = ema12 - ema26
+
+    df["macd_signal"] = df["macd"].ewm(
+        span=9,
+        adjust=False
+    ).mean()
+
+    df["macd_hist"] = (
+        df["macd"] - df["macd_signal"]
+    )
+
+    # ATR
+    previous_close = close.shift(1)
+
+    tr = pd.concat(
+        [
+            high - low,
+            (high - previous_close).abs(),
+            (low - previous_close).abs()
+        ],
+        axis=1
+    ).max(axis=1)
+
+    df["atr"] = tr.ewm(
+        alpha=1 / ATR_PERIOD,
+        adjust=False,
+        min_periods=ATR_PERIOD
+    ).mean()
+
+    # ADX
+    up_move = high.diff()
+    down_move = -low.diff()
+
+    plus_dm = pd.Series(
+        np.where(
+            (up_move > down_move) & (up_move > 0),
+            up_move,
+            0
+        ),
+        index=df.index
+    )
+
+    minus_dm = pd.Series(
+        np.where(
+            (down_move > up_move) & (down_move > 0),
+            down_move,
+            0
+        ),
+        index=df.index
+    )
+
+    atr_safe = df["atr"].replace(0, np.nan)
+
+    plus_di = 100 * (
+        plus_dm.ewm(
+            alpha=1 / ATR_PERIOD,
+            adjust=False
+        ).mean() / atr_safe
+    )
+
+    minus_di = 100 * (
+        minus_dm.ewm(
+            alpha=1 / ATR_PERIOD,
+            adjust=False
+        ).mean() / atr_safe
+    )
+
+    dx = (
+        100 * (plus_di - minus_di).abs()
+        / (plus_di + minus_di).replace(0, np.nan)
+    )
+
+    df["adx"] = dx.ewm(
+        alpha=1 / ATR_PERIOD,
+        adjust=False
+    ).mean()
+
+    df["plus_di"] = plus_di
+    df["minus_di"] = minus_di
+
+    # Volume confirmation
+    df["volume_avg20"] = volume.rolling(
+        VOLUME_PERIOD
+    ).mean()
+
+    df["volume_ratio"] = (
+        volume / df["volume_avg20"].replace(0, np.nan)
+    )
+
+    # Price structure
+    df["resistance20"] = high.shift(1).rolling(20).max()
+    df["support20"] = low.shift(1).rolling(20).min()
+
+    return df
+
+
+# ---------------- WEEKLY TREND ----------------
+
+def calculate_weekly_trend(df):
+
+    weekly = (
+        df.set_index("date")
+        .resample("W-FRI")
+        .agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum"
+        })
+        .dropna()
+        .reset_index()
+    )
+
+    if len(weekly) < 40:
+        return "INSUFFICIENT HISTORY"
+
+    weekly["ema20"] = weekly["close"].ewm(
+        span=20,
+        adjust=False
+    ).mean()
+
+    weekly["ema40"] = weekly["close"].ewm(
+        span=40,
+        adjust=False
+    ).mean()
+
+    last = weekly.iloc[-1]
+
+    if (
+        last["close"] > last["ema20"]
+        and last["ema20"] > last["ema40"]
+    ):
+        return "BULLISH"
+
+    if (
+        last["close"] < last["ema20"]
+        and last["ema20"] < last["ema40"]
+    ):
+        return "BEARISH"
+
+    return "SIDEWAYS"
+
+
+# ---------------- SIGNAL ENGINE ----------------
+
+def analyze_stock(symbol, df):
+
+    if df is None or len(df) < MIN_HISTORY:
         return None
 
-    risk_amount = CAPITAL * RISK_PERCENT
+    df = calculate_indicators(df)
 
-    quantity_risk = int(risk_amount // risk_per_share)
-    quantity_capital = int(CAPITAL // entry)
+    current = df.iloc[-1]
+    previous = df.iloc[-2]
 
-    quantity = min(quantity_risk, quantity_capital)
+    price = float(current["close"])
+    atr = float(current["atr"])
 
-    if quantity < 1:
+    if not np.isfinite(atr) or atr <= 0:
         return None
 
-    target1 = entry + 2 * risk_per_share
-    target2 = entry + 3 * risk_per_share
+    if not np.isfinite(current["ema200"]):
+        return None
+
+    weekly_trend = calculate_weekly_trend(df)
+
+    bullish_score = 0
+    bearish_score = 0
+    reasons = []
+
+    # -------- BULLISH CONDITIONS --------
+
+    if price > current["ema200"]:
+        bullish_score += 20
+        reasons.append("Price above EMA200")
+
+    if current["ema20"] > current["ema50"]:
+        bullish_score += 15
+        reasons.append("EMA20 above EMA50")
+
+    if current["ema50"] > current["ema200"]:
+        bullish_score += 15
+        reasons.append("EMA50 above EMA200")
+
+    if 50 <= current["rsi"] <= 70:
+        bullish_score += 10
+        reasons.append("Positive RSI momentum")
+
+    if current["macd"] > current["macd_signal"]:
+        bullish_score += 10
+        reasons.append("MACD bullish")
+
+    if current["adx"] >= MIN_ADX:
+        if current["plus_di"] > current["minus_di"]:
+            bullish_score += 10
+            reasons.append("Strong positive trend")
+
+    if current["volume_ratio"] >= 1.3:
+        bullish_score += 10
+        reasons.append("Volume confirmation")
+
+    if weekly_trend == "BULLISH":
+        bullish_score += 10
+        reasons.append("Weekly trend bullish")
+
+    # -------- BEARISH CONDITIONS --------
+
+    if price < current["ema200"]:
+        bearish_score += 20
+
+    if current["ema20"] < current["ema50"]:
+        bearish_score += 15
+
+    if current["ema50"] < current["ema200"]:
+        bearish_score += 15
+
+    if current["rsi"] < 45:
+        bearish_score += 10
+
+    if current["macd"] < current["macd_signal"]:
+        bearish_score += 10
+
+    if current["adx"] >= MIN_ADX:
+        if current["minus_di"] > current["plus_di"]:
+            bearish_score += 10
+
+    if current["volume_ratio"] >= 1.3:
+        bearish_score += 10
+
+    if weekly_trend == "BEARISH":
+        bearish_score += 10
+
+    # -------- ENTRY / EXIT LEVELS --------
+
+    long_stop = price - STOP_ATR * atr
+    long_risk = price - long_stop
+
+    long_target1 = price + TARGET_ONE_R * long_risk
+    long_target2 = price + TARGET_TWO_R * long_risk
+
+    short_stop = price + STOP_ATR * atr
+    short_risk = short_stop - price
+
+    short_target1 = price - TARGET_ONE_R * short_risk
+    short_target2 = price - TARGET_TWO_R * short_risk
+
+    resistance = float(current["resistance20"])
+    support = float(current["support20"])
+
+    bullish_breakout = (
+        price > resistance
+        and current["volume_ratio"] >= 1.3
+    )
+
+    bearish_breakdown = (
+        price < support
+        and current["volume_ratio"] >= 1.3
+    )
+
+    signal = "WATCH"
+    entry_price = None
+    stop_loss = None
+    target1 = None
+    target2 = None
+
+    # BUY
+    if (
+        bullish_score >= MIN_BUY_SCORE
+        and weekly_trend == "BULLISH"
+    ):
+
+        signal = "BUY ENTRY"
+        entry_price = price
+        stop_loss = long_stop
+        target1 = long_target1
+        target2 = long_target2
+
+        if bullish_breakout:
+            reasons.append("20-day resistance breakout")
+
+    # EXIT for long positions
+    elif (
+        price < current["ema50"]
+        and current["macd"] < current["macd_signal"]
+        and weekly_trend != "BULLISH"
+    ):
+
+        signal = "EXIT LONG"
+        reasons.append("Trend deterioration")
+
+    # SHORT WATCH
+    elif (
+        bearish_score >= MIN_SHORT_SCORE
+        and weekly_trend == "BEARISH"
+        and bearish_breakdown
+    ):
+
+        signal = "SHORT WATCH"
+        entry_price = price
+        stop_loss = short_stop
+        target1 = short_target1
+        target2 = short_target2
+
+        reasons.append("20-day support breakdown")
+
+    # HOLD
+    elif (
+        price > current["ema50"]
+        and weekly_trend == "BULLISH"
+        and current["macd"] > current["macd_signal"]
+    ):
+
+        signal = "HOLD"
+        reasons.append("Existing bullish trend intact")
+
+    # -------- OUTPUT --------
 
     return {
         "symbol": symbol,
-        "price": price,
-        "entry": entry,
-        "stop": stop,
-        "target1": target1,
-        "target2": target2,
-        "quantity": quantity,
-        "risk": quantity * risk_per_share,
-        "score": score + 2,
-        "reasons": reasons
+        "date": str(current["date"].date()),
+        "signal": signal,
+        "price": round(price, 2),
+        "entry_price": (
+            round(entry_price, 2)
+            if entry_price is not None else None
+        ),
+        "stop_loss": (
+            round(stop_loss, 2)
+            if stop_loss is not None else None
+        ),
+        "target_1": (
+            round(target1, 2)
+            if target1 is not None else None
+        ),
+        "target_2": (
+            round(target2, 2)
+            if target2 is not None else None
+        ),
+        "rsi": round(float(current["rsi"]), 2),
+        "adx": round(float(current["adx"]), 2),
+        "atr": round(atr, 2),
+        "volume_ratio": (
+            round(float(current["volume_ratio"]), 2)
+            if np.isfinite(current["volume_ratio"])
+            else None
+        ),
+        "bullish_score": bullish_score,
+        "bearish_score": bearish_score,
+        "weekly_trend": weekly_trend,
+        "reasons": "; ".join(reasons),
+        "holding_period": "2-3 months"
     }
 
 
-def main():
+# ---------------- MAIN SCANNER ----------------
 
-    if not API_TOKEN:
-        log.error("EODHD token missing")
-        return 2
+def run_scanner():
 
     symbols = load_symbols()
 
-    stats = Counter()
-    signals = []
-
-    log.info("Starting scan of %d stocks", len(symbols))
-
-    for index, symbol in enumerate(symbols, 1):
-
-        log.info("[%d/%d] %s", index, len(symbols), symbol)
-
-        try:
-            prices = get_prices(symbol)
-            stats["price_ok"] += 1
-
-        except requests.HTTPError as exc:
-
-            if exc.response is not None and exc.response.status_code == 404:
-                stats["price_404"] += 1
-                log.warning("%s unavailable (404)", symbol)
-                continue
-
-            log.exception("Price API failure")
-            return 1
-
-        except Exception as exc:
-            log.error("%s price failure: %s", symbol, exc)
-            return 1
-
-        candidate = technical_screen(prices)
-
-        if candidate is None:
-            stats["technical_reject"] += 1
-            continue
-
-        stats["technical_candidates"] += 1
-
-        try:
-            fundamentals = get_fundamentals(symbol)
-            stats["fundamentals_ok"] += 1
-
-        except requests.HTTPError as exc:
-
-            if exc.response is not None and exc.response.status_code == 404:
-                stats["fundamentals_404"] += 1
-                continue
-
-            log.exception("Fundamentals API failure")
-            return 1
-
-        except Exception as exc:
-            log.error("%s fundamentals failure: %s", symbol, exc)
-            return 1
-
-        signal = create_signal(
-            symbol,
-            candidate,
-            fundamentals
-        )
-
-        if signal:
-            signals.append(signal)
-            stats["signals"] += 1
-
-    attempted = len(symbols)
-    successful = stats["price_ok"]
-
-    log.info("========== SCAN SUMMARY ==========")
-
-    log.info("Stocks attempted: %d", attempted)
-    log.info("Price history successful: %d", successful)
-    log.info("Price 404: %d", stats["price_404"])
-    log.info("Technical rejected: %d", stats["technical_reject"])
-    log.info("Technical candidates: %d", stats["technical_candidates"])
-    log.info("Fundamentals checked: %d", stats["fundamentals_ok"])
-    log.info("Fundamentals unavailable: %d", stats["fundamentals_404"])
-    log.info("Signals: %d", len(signals))
-
-    coverage = successful / attempted if attempted else 0
-
-    if coverage < MIN_COVERAGE:
-
-        message = (
-            f"SCANNER DATA WARNING: only {successful}/{attempted} "
-            "stocks returned usable price history. Scan incomplete."
-        )
-
-        log.error(message)
-
-        try:
-            telegram(message)
-        except Exception:
-            log.exception("Telegram failed")
-
-        return 1
-
-    signals.sort(
-        key=lambda x: x["score"],
-        reverse=True
+    logging.info(
+        "Starting NSE scanner for %s symbols",
+        len(symbols)
     )
 
-    if signals:
+    client = TejClient()
 
-        message = "INDIAN SWING SCANNER RESULTS\n\n"
+    results = []
+    failures = []
 
-        for s in signals[:10]:
+    end_date = date.today()
 
-            message += (
-                f"{s['symbol']}\n"
-                f"Close: Rs.{s['price']:.2f}\n"
-                f"Entry: Rs.{s['entry']:.2f}\n"
-                f"Stop: Rs.{s['stop']:.2f}\n"
-                f"Target 1: Rs.{s['target1']:.2f}\n"
-                f"Target 2: Rs.{s['target2']:.2f}\n"
-                f"Quantity: {s['quantity']}\n"
-                f"Risk: Rs.{s['risk']:.2f}\n"
-                f"Score: {s['score']}\n\n"
-            )
-
-    else:
-
-        message = (
-            f"No qualifying setups today.\n"
-            f"Data coverage: {successful}/{attempted}"
-        )
-
-    print(message)
+    start_date = end_date - timedelta(
+        days=HISTORY_DAYS
+    )
 
     try:
-        telegram(message[:3900])
-    except Exception:
-        log.exception("Telegram delivery failed")
 
-    log.info("Scan completed successfully")
+        for index, symbol in enumerate(symbols, start=1):
 
-    return 0
+            try:
+
+                logging.info(
+                    "[%s/%s] Scanning %s",
+                    index,
+                    len(symbols),
+                    symbol
+                )
+
+                raw = client.get_ohlcv(
+                    symbol,
+                    EXCHANGE,
+                    start_date.isoformat(),
+                    end_date.isoformat()
+                )
+
+                df = normalize_data(raw)
+
+                if df is None:
+                    failures.append({
+                        "symbol": symbol,
+                        "error": "No valid OHLCV data"
+                    })
+                    continue
+
+                result = analyze_stock(symbol, df)
+
+                if result:
+                    results.append(result)
+                else:
+                    failures.append({
+                        "symbol": symbol,
+                        "error": "Insufficient history or indicators"
+                    })
+
+            except Exception as error:
+
+                logging.warning(
+                    "%s failed: %s",
+                    symbol,
+                    error
+                )
+
+                failures.append({
+                    "symbol": symbol,
+                    "error": str(error)
+                })
+
+            time.sleep(REQUEST_DELAY)
+
+    finally:
+        client.close()
+
+    if not results:
+        logging.warning("No valid scanner results.")
+        return
+
+    result_df = pd.DataFrame(results)
+
+    result_df = result_df.sort_values(
+        by=["bullish_score", "bearish_score"],
+        ascending=False
+    )
+
+    # Save all results
+    export_csv(
+        result_df.to_dict("records"),
+        "nse_scanner_all.csv"
+    )
+
+    export_json(
+        result_df.to_dict("records"),
+        "nse_scanner_all.json"
+    )
+
+    # Save BUY signals
+    buys = result_df[
+        result_df["signal"] == "BUY ENTRY"
+    ]
+
+    export_csv(
+        buys.to_dict("records"),
+        "nse_buy_signals.csv"
+    )
+
+    # Save EXIT signals
+    exits = result_df[
+        result_df["signal"] == "EXIT LONG"
+    ]
+
+    export_csv(
+        exits.to_dict("records"),
+        "nse_exit_signals.csv"
+    )
+
+    # Save short watchlist
+    shorts = result_df[
+        result_df["signal"] == "SHORT WATCH"
+    ]
+
+    export_csv(
+        shorts.to_dict("records"),
+        "nse_short_watch.csv"
+    )
+
+    # Save HOLD signals
+    holds = result_df[
+        result_df["signal"] == "HOLD"
+    ]
+
+    export_csv(
+        holds.to_dict("records"),
+        "nse_hold_signals.csv"
+    )
+
+    export_json(
+        failures,
+        "nse_scan_failures.json"
+    )
+
+    print("\n========== NSE SCANNER REPORT ==========")
+
+    print(f"Symbols loaded: {len(symbols)}")
+    print(f"Successful analysis: {len(results)}")
+    print(f"Failed symbols: {len(failures)}")
+
+    print(f"BUY ENTRY: {len(buys)}")
+    print(f"HOLD: {len(holds)}")
+    print(f"EXIT LONG: {len(exits)}")
+    print(f"SHORT WATCH: {len(shorts)}")
+
+    print("\nTOP BUY CANDIDATES")
+
+    print(
+        buys[
+            [
+                "symbol",
+                "price",
+                "entry_price",
+                "stop_loss",
+                "target_1",
+                "target_2",
+                "bullish_score"
+            ]
+        ].head(20).to_string(index=False)
+    )
+
+    print("\nFiles saved in data/ directory.")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
-  
+    run_scanner()
+    
