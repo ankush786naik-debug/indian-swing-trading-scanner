@@ -648,23 +648,36 @@ def analyze_stock(symbol, df):
 
 
 # ==================================================
-# EXPORT RESULTS
+# EXPORT RESULTS - FIXED VERSION
 # ==================================================
 
 def save_results(results, failures, total_symbols):
 
+    # Always save the failure report
+    export_json(
+        failures,
+        "nse_scan_failures.json"
+    )
+
+    print("\n========== NSE SCANNER REPORT ==========")
+
+    print(f"Total symbols loaded: {total_symbols}")
+    print(f"Successful analysis: {len(results)}")
+    print(f"Failed symbols: {len(failures)}")
+
+    # Stop safely if no stocks were analysed
     if not results:
+
         logging.warning(
             "No stocks passed the minimum analysis requirements."
         )
 
-        export_json(
-            failures,
-            "nse_scan_failures.json"
-        )
+        print("\nNo valid scanner results.")
+        print("Check data/nse_scan_failures.json for errors.")
 
         return
 
+    # Create result DataFrame
     result_df = pd.DataFrame(results)
 
     result_df = result_df.sort_values(
@@ -672,7 +685,7 @@ def save_results(results, failures, total_symbols):
         ascending=False
     )
 
-    # All stocks
+    # Save complete scanner results
     export_csv(
         result_df.to_dict("records"),
         "nse_scanner_all.csv"
@@ -683,64 +696,68 @@ def save_results(results, failures, total_symbols):
         "nse_scanner_all.json"
     )
 
-    # BUY
+    # Separate signal categories
     buys = result_df[
         result_df["signal"] == "BUY ENTRY"
     ]
 
-    export_csv(
-        buys.to_dict("records"),
-        "nse_buy_signals.csv"
-    )
-
-    # EXIT
     exits = result_df[
         result_df["signal"] == "EXIT LONG"
     ]
 
-    export_csv(
-        exits.to_dict("records"),
-        "nse_exit_signals.csv"
-    )
-
-    # SHORT WATCH
     shorts = result_df[
         result_df["signal"] == "SHORT WATCH"
     ]
 
-    export_csv(
-        shorts.to_dict("records"),
-        "nse_short_watch.csv"
-    )
-
-    # HOLD
     holds = result_df[
         result_df["signal"] == "HOLD"
     ]
 
-    export_csv(
-        holds.to_dict("records"),
-        "nse_hold_signals.csv"
-    )
+    watches = result_df[
+        result_df["signal"] == "WATCH"
+    ]
 
-    # Failures
-    export_json(
-        failures,
-        "nse_scan_failures.json"
-    )
+    # Export only non-empty signal groups
+    signal_files = [
+        (buys, "nse_buy_signals.csv"),
+        (exits, "nse_exit_signals.csv"),
+        (shorts, "nse_short_watch.csv"),
+        (holds, "nse_hold_signals.csv"),
+        (watches, "nse_watch_signals.csv"),
+    ]
 
-    # REPORT
-    print("\n========== NSE SCANNER REPORT ==========")
+    for group, filename in signal_files:
 
-    print(f"Symbols loaded: {total_symbols}")
-    print(f"Successful analysis: {len(results)}")
-    print(f"Failed symbols: {len(failures)}")
+        if not group.empty:
+
+            export_csv(
+                group.to_dict("records"),
+                filename
+            )
+
+            logging.info(
+                "Saved %s (%s records)",
+                filename,
+                len(group)
+            )
+
+        else:
+
+            logging.info(
+                "Skipped %s because it has no records.",
+                filename
+            )
+
+    # Print signal counts
+    print("\n========== SIGNAL SUMMARY ==========")
 
     print(f"BUY ENTRY: {len(buys)}")
     print(f"HOLD: {len(holds)}")
     print(f"EXIT LONG: {len(exits)}")
     print(f"SHORT WATCH: {len(shorts)}")
+    print(f"WATCH: {len(watches)}")
 
+    # Top BUY candidates
     print("\n========== TOP BUY CANDIDATES ==========")
 
     if not buys.empty:
@@ -754,14 +771,17 @@ def save_results(results, failures, total_symbols):
                     "stop_loss",
                     "target_1",
                     "target_2",
-                    "bullish_score"
+                    "bullish_score",
+                    "weekly_trend"
                 ]
             ].head(20).to_string(index=False)
         )
 
     else:
+
         print("No BUY ENTRY signals today.")
 
+    # Top SHORT WATCH candidates
     print("\n========== TOP SHORT WATCH ==========")
 
     if not shorts.empty:
@@ -775,15 +795,19 @@ def save_results(results, failures, total_symbols):
                     "stop_loss",
                     "target_1",
                     "target_2",
-                    "bearish_score"
+                    "bearish_score",
+                    "weekly_trend"
                 ]
             ].head(20).to_string(index=False)
         )
 
     else:
+
         print("No SHORT WATCH signals today.")
 
-    print("\nFiles saved in data/ directory.")
+    print("\n========== EXPORT COMPLETE ==========")
+    print("Files saved in data/ directory.")
+
 
 
 # ==================================================
