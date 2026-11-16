@@ -66,38 +66,35 @@ logging.basicConfig(
 
 # ---------------- SYMBOL LOADER ----------------
 
-def load_symbols():
 
+def load_symbols():
     if not os.path.exists(SYMBOL_FILE):
-        raise FileNotFoundError(
-            "symbols.txt not found."
-        )
+        raise FileNotFoundError("symbols.txt not found.")
 
     symbols = []
 
-    with open(
-        SYMBOL_FILE,
-        "r",
-        encoding="utf-8"
-    ) as file:
-
+    with open(SYMBOL_FILE, "r", encoding="utf-8") as file:
         for line in file:
-
             symbol = line.strip().upper()
 
-            if not symbol:
+            if not symbol or symbol.startswith("#"):
                 continue
 
-            if symbol.startswith("#"):
-                continue
-
-            # Ignore headers
             if symbol in ("SYMBOL", "SYMBOLS", "TICKER"):
                 continue
 
-            symbols.append(symbol)
+            # TejHQ receives exchange separately as "nse".
+            # Remove exchange suffixes from the symbol.
+            for suffix in (".NSE", ".NS"):
+                if symbol.endswith(suffix):
+                    symbol = symbol[:-len(suffix)]
+                    break
+
+            if symbol:
+                symbols.append(symbol)
 
     return sorted(set(symbols))
+    
 
 
 # ---------------- DATA NORMALIZATION ----------------
