@@ -1,7 +1,7 @@
 
 import requests
 
-from app.config import (
+from config import (
     API_BASE_URL,
     API_KEY,
     REQUEST_TIMEOUT
