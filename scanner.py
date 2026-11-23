@@ -30,9 +30,9 @@ def metric(obj,labels):
         if isinstance(x,dict):
             for k,v in x.items():
                 nk=norm(k)
-                if any(a in nk for a in labels):
+                if nk in labels or any(len(a)>=4 and a in nk for a in labels):
                     if isinstance(v,dict):
-                        for vk in ("value","current","ratio","amount","latest","percentage","percent"):
+                        for vk in ("value","current","current_value","ratio","amount","latest","latest_value","percentage","percent"):
                             z=num(v.get(vk))
                             if z is not None: found.append(z)
                     else:
@@ -43,8 +43,8 @@ def metric(obj,labels):
             for row in x:
                 if isinstance(row,dict):
                     label=norm(row.get("name") or row.get("ratio_name") or row.get("metric") or row.get("key") or "")
-                    if any(a in label for a in labels):
-                        for vk in ("value","current","ratio","amount","latest","percentage","percent"):
+                    if label in labels or any(len(a)>=4 and a in label for a in labels):
+                        for vk in ("value","current","current_value","ratio","amount","latest","latest_value","percentage","percent"):
                             z=num(row.get(vk))
                             if z is not None: found.append(z)
                 walk(row)
@@ -67,7 +67,9 @@ def growth(obj,terms):
                         if z is not None: found.append(z)
                 walk(v,full)
         elif isinstance(x,list):
-            for v in x: walk(v,ctx)
+            for v in x:
+                label=norm(v.get("name") or v.get("category") or v.get("metric") or v.get("label") or "") if isinstance(v,dict) else ""
+                walk(v,ctx+"_"+label)
     walk(obj)
     return found[0] if found else None
 
@@ -77,8 +79,8 @@ def fundamentals_score(d):
     roe=metric(r,["roe","return_on_equity"])
     rev=growth(i,["revenue","sales","total_income"])
     profit=growth(i,["net_profit","profit_after_tax","pat"])
-    pe=metric(r,["pe_ratio","price_earnings","p_e"])
-    sector_pe=metric(r,["sector_pe","sector_price_earnings","benchmark_pe"])
+    pe=metric(r,["pe_ratio","price_earnings","p_e","pe"])
+    sector_pe=metric(r,["sector_pe","sector_average_pe","sector_price_earnings","benchmark_pe"])
     ocf=metric(c,["operating_cash_flow","cash_from_operating_activities","net_cash_operating"])
     assets=metric(b,["total_assets"]); liabilities=metric(b,["total_liabilities"])
     weighted=total=0.0
