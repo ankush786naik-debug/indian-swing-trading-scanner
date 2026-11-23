@@ -62,7 +62,7 @@ def send_telegram_document(file_path, caption):
             f'Content-Disposition: form-data; name="caption"\r\n\r\n'
             f"{caption}\r\n"
             f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="document"; filename="nse_daily_signals.csv"\r\n'
+            f'Content-Disposition: form-data; name="document"; filename="{os.path.basename(file_path)}"\r\n'
             f"Content-Type: text/csv\r\n\r\n"
         ).encode("utf-8")
 
