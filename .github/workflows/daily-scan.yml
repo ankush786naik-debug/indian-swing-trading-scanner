@@ -1,4 +1,4 @@
-name: Daily NSE Top-5 Swing Research
+name: Daily NSE Swing Research
 
 on:
   schedule:
@@ -40,10 +40,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: daily-top5-swing-research
+          name: daily-all-qualified-swing-research
           path: |
-            data/top5_swing_stocks.csv
-            data/top5_swing_stocks_*.csv
+            data/all_swing_stocks.csv
+            data/all_swing_stocks_*.csv
             data/scan_diagnostics.json
           if-no-files-found: warn
           retention-days: 30
