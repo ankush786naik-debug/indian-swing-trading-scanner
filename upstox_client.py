@@ -33,7 +33,6 @@ class UpstoxClient:
         items=json.loads(gzip.decompress(r.content).decode("utf-8"));result=[];seen=set()
         for x in items:
             if x.get("segment")!="NSE_EQ" or x.get("instrument_type")!="EQ":continue
-            if x.get("security_type") not in (None,"","NORMAL"):continue
             key=x.get("instrument_key");symbol=x.get("trading_symbol")
             if not key or not symbol or key in seen:continue
             seen.add(key);result.append({"instrument_key":key,"symbol":symbol,"name":x.get("name") or x.get("short_name") or symbol,"isin":x.get("isin") or ""})
