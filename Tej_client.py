@@ -95,10 +95,10 @@ class TejClient:
         params = {}
         symbol = symbol.upper().strip()
 
-for suffix in (".NSE", ".NS"):
-    if symbol.endswith(suffix):
-        symbol = symbol[:-len(suffix)]
-        break
+        for suffix in (".NSE", ".NS"):
+            if symbol.endswith(suffix):
+                symbol = symbol[:-len(suffix)]
+                break
 
         if from_date:
             params["from"] = from_date
