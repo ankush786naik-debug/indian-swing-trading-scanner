@@ -2,7 +2,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from scanner import fundamentals_score, news_score, analyze
+from scanner import fundamentals_score, news_score, analyze, map_quote_to_stock
 from upstox_client import UpstoxClient
 
 
@@ -26,6 +26,17 @@ class ScannerResearchTests(unittest.TestCase):
         self.assertGreaterEqual(result["fundamental_score"], 50)
         self.assertGreater(result["fundamental_coverage"], 0.5)
         self.assertAlmostEqual(result["Liabilities_to_assets"], 0.4)
+
+
+    def test_upstox_quote_key_is_resolved_by_symbol(self):
+        stock = {"instrument_key": "NSE_EQ|INE848E01016", "symbol": "RELIANCE"}
+        found = map_quote_to_stock(
+            "NSE_EQ:RELIANCE",
+            {"symbol": "RELIANCE", "last_price": 1500},
+            {stock["instrument_key"]: stock},
+            {stock["symbol"]: stock},
+        )
+        self.assertEqual(found["instrument_key"], stock["instrument_key"])
 
     def test_full_nse_instrument_master_filter_includes_all_equity_types(self):
         self.assertTrue(callable(UpstoxClient.load_nse_equities))
