@@ -8,7 +8,6 @@ from telegram_alerts import send_telegram_document, send_telegram_message
 from upstox_client import UpstoxClient
 
 OUT="data"
-CANDLE_LIMIT=int(os.getenv("MAX_CANDLE_CANDIDATES","350"))
 RESEARCH_LIMIT=int(os.getenv("MAX_FUNDAMENTAL_CANDIDATES","25"))
 TURNOVER_MIN=float(os.getenv("MIN_DAILY_TURNOVER_CRORE","3"))
 MIN_SCORE=float(os.getenv("MIN_FINAL_SCORE","62"))
@@ -182,7 +181,7 @@ def main():
         quote_data=client.quotes([x["instrument_key"] for x in universe])
         lookup={x["instrument_key"]:x for x in universe}
         by_symbol={x["symbol"]:x for x in universe}
-        liquid=[]
+        active=[]
         for key,q in quote_data.items():
             # Upstox quote data keys use NSE_EQ:SYMBOL, not instrument_key.
             stock=map_quote_to_stock(key,q,lookup,by_symbol)
@@ -190,10 +189,11 @@ def main():
             ltp=num(q.get("last_price")); volume=num(q.get("volume"))
             if not ltp or not volume or ltp<=0 or volume<=0:continue
             turnover=ltp*volume/1e7
-            if turnover>=TURNOVER_MIN: liquid.append({**stock,"turnover":turnover})
-        liquid.sort(key=lambda x:x["turnover"],reverse=True)
-        candle_stocks=liquid[:CANDLE_LIMIT]
-        logging.info("Quote screen %d stocks; fetching daily candles for dynamic top-liquidity %d",len(liquid),len(candle_stocks))
+            active.append({**stock,"turnover":turnover})
+        active.sort(key=lambda x:x["turnover"],reverse=True)
+        # No fixed Nifty 500/1,000 list: analyse every active NSE_EQ equity.
+        candle_stocks=active
+        logging.info("Active NSE_EQ stocks with valid quote and volume: %d",len(active))
         end=date.today(); start=end-timedelta(days=420); tech=[]
         for idx,s in enumerate(candle_stocks,1):
             try:
@@ -213,6 +213,7 @@ def main():
                 nscore=news_score(news.get(s["instrument_key"],[]) if isinstance(news,dict) else [])
                 if fscore["fundamental_score"] is None or fscore["fundamental_coverage"]<.45:continue
                 if nscore["news_count_7d"]==0 or nscore["news_sentiment"]<-.25:continue
+                if s["turnover_crore"]<TURNOVER_MIN:continue
                 if s["technical_score"]<55 or s["risk_pct"]>5.0:continue
                 combined=.45*s["technical_score"]+.40*fscore["fundamental_score"]+.15*nscore["news_score"]
                 researched.append({**s,**fscore,**nscore,"combined_score":round(combined,1)})
@@ -231,10 +232,10 @@ def main():
         path=os.path.join(OUT,"top5_swing_stocks.csv")
         pd.DataFrame(rows,columns=columns).to_csv(path,index=False,encoding="utf-8-sig")
         pd.DataFrame(rows,columns=columns).to_csv(os.path.join(OUT,f"top5_swing_stocks_{today}.csv"),index=False,encoding="utf-8-sig")
-        export_json({"date":today,"nse_eq_universe":len(universe),"quote_screened":len(liquid),"deep_candle_candidates":len(candle_stocks),
+        export_json({"date":today,"nse_eq_universe":len(universe),"quote_screened":len(active),"deep_candle_candidates":len(candle_stocks),
                      "technical_valid":len(tech),"news_fundamental_research":len(pool),"qualified_top5":len(top),"failures":failures},"scan_diagnostics.json")
-        caption=(f"📊 NSE TOP-5 SWING RESEARCH | {today}\nNSE EQ universe: {len(universe)} | quote-screened: {len(liquid)}\n"
-                 f"Daily candles: {len(candle_stocks)} dynamically selected liquid stocks\nFundamentals + 7-day news: {len(pool)} | Qualified picks: {len(top)}\nNo forced picks. Research only; no orders placed.")
+        caption=(f"📊 NSE TOP-5 SWING RESEARCH | {today}\nNSE EQ universe: {len(universe)} | active quote universe: {len(active)}\n"
+                 f"Daily candles: {len(candle_stocks)} across the full active NSE_EQ universe\nFundamentals + 7-day news: {len(pool)} | Qualified picks: {len(top)}\nNo forced picks. Research only; no orders placed.")
         logging.info(caption);send_telegram_message(caption);send_telegram_document(path,caption)
     finally:client.close()
 
