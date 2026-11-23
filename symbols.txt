@@ -1,6 +1,6 @@
-# Nifty 500 constituent universe; symbols formatted for EODHD NSE exchange.
+# NSE large-cap universe; symbols are normalized by scanner.py for TejHQ NSE OHLCV.
 # Source: Nifty 500 current-members dataset (checked 15 Nov 2026).
-# Confirm EODHD symbol availability for special-character tickers such as ARE&M, M&M, M&MFIN, BAJAJ-AUTO, and J&KBANK.
+# Special-character tickers are passed using their exchange trading symbols.
 360ONE.NSE
 3MINDIA.NSE
 ABB.NSE
