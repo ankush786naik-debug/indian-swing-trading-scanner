@@ -23,7 +23,7 @@ import pandas as pd
 
 from Tej_client import TejClient
 from exporters import export_csv, export_json
-from telegram_alerts import send_signal_alerts
+from telegram_alerts import send_signal_alerts, send_telegram_message
 
 
 # ==================================================
@@ -34,10 +34,10 @@ SYMBOL_FILE = "symbols.txt"
 OUTPUT_DIR = "data"
 EXCHANGE = "nse"
 
-HISTORY_DAYS = 450
+HISTORY_DAYS = 365
 MIN_HISTORY = 220
 
-REQUEST_DELAY = 0.20
+REQUEST_DELAY = 0.15
 
 RSI_PERIOD = 14
 ATR_PERIOD = 14
@@ -650,72 +650,112 @@ def analyze_stock(symbol, df):
 
 
 # ==================================================
-# SAVE RESULTS
+# SAVE RESULTS AND RUN SCAN
 # ==================================================
 
 def save_results(results, failures, total_symbols):
-
-    # Always save failure report
-    export_json(
-        failures,
-        "nse_scan_failures.json"
-    )
-
-    print("\n========== NSE SCANNER REPORT ==========")
-    print(f"Total symbols: {total_symbols}")
-    print(f"Successful analysis: {len(results)}")
-    print(f"Failed symbols: {len(failures)}")
-
-    if not results:
-        print("\nNo valid scanner results.")
-        print("Check data/nse_scan_failures.json")
-        return
+    export_json(failures, "nse_scan_failures.json")
 
     result_df = pd.DataFrame(results)
+    if not result_df.empty:
+        result_df = result_df.sort_values(
+            by=["bullish_score", "bearish_score"],
+            ascending=False
+        )
+        export_csv(result_df.to_dict("records"), "nse_scanner_all.csv")
+        export_json(result_df.to_dict("records"), "nse_scanner_all.json")
 
-    result_df = result_df.sort_values(
-        by=["bullish_score", "bearish_score"],
-        ascending=False
+        signal_files = [
+            ("BUY ENTRY", "nse_buy_signals.csv"),
+            ("EXIT LONG", "nse_exit_signals.csv"),
+            ("SHORT WATCH", "nse_short_watch.csv"),
+            ("HOLD", "nse_hold_signals.csv"),
+            ("WATCH", "nse_watch_signals.csv"),
+        ]
+        for signal_name, filename in signal_files:
+            group = result_df[result_df["signal"] == signal_name]
+            if not group.empty:
+                export_csv(group.to_dict("records"), filename)
+
+        buys = result_df[result_df["signal"] == "BUY ENTRY"]
+        exits = result_df[result_df["signal"] == "EXIT LONG"]
+    else:
+        buys = pd.DataFrame()
+        exits = pd.DataFrame()
+
+    summary = (
+        "📊 NSE SWING SCANNER RUN COMPLETE\n"
+        f"Symbols scanned: {total_symbols}\n"
+        f"Successful analysis: {len(results)}\n"
+        f"Data/API failures: {len(failures)}\n"
+        f"BUY signals: {len(buys)}\n"
+        f"EXIT signals: {len(exits)}\n"
+        "Research alerts only — no orders placed."
     )
+    print(summary)
+    send_telegram_message(summary)
 
-    # Save all results
-    export_csv(
-        result_df.to_dict("records"),
-        "nse_scanner_all.csv"
-    )
-
-    export_json(
-        result_df.to_dict("records"),
-        "nse_scanner_all.json"
-    )
-
-    # Separate categories
-    buys = result_df[result_df["signal"] == "BUY ENTRY"]
-    exits = result_df[result_df["signal"] == "EXIT LONG"]
-    shorts = result_df[result_df["signal"] == "SHORT WATCH"]
-    holds = result_df[result_df["signal"] == "HOLD"]
-    watches = result_df[result_df["signal"] == "WATCH"]
-
-    signal_files = [
-        (buys, "nse_buy_signals.csv"),
-        (exits, "nse_exit_signals.csv"),
-        (shorts, "nse_short_watch.csv"),
-        (holds, "nse_hold_signals.csv"),
-        (watches, "nse_watch_signals.csv"),
-    ]
-
-    for group, filename in signal_files:
-
-        if group.empty:
-            logging.info(
-                "No records for %s; export skipped.",
-                filename
-            )
-            continue
-
-            export_csv(
-                group.to_dict("records"),
-                filename
-            )
-
+    if not buys.empty or not exits.empty:
         send_signal_alerts(buys, exits)
+
+
+def main():
+    symbols = load_symbols()
+    client = TejClient()
+    results = []
+    failures = []
+    start_date = (date.today() - timedelta(days=HISTORY_DAYS)).isoformat()
+    end_date = date.today().isoformat()
+
+    logging.info(
+        "Starting NSE scan: %d symbols, history %s to %s, source TejHQ",
+        len(symbols), start_date, end_date
+    )
+
+    try:
+        for index, symbol in enumerate(symbols, start=1):
+            try:
+                raw = client.get_ohlcv(
+                    symbol,
+                    exchange=EXCHANGE,
+                    from_date=start_date,
+                    to_date=end_date
+                )
+                candles = normalize_data(raw)
+                if candles is None or len(candles) < MIN_HISTORY:
+                    raise ValueError(
+                        f"Insufficient/invalid OHLCV rows: "
+                        f"{0 if candles is None else len(candles)}"
+                    )
+
+                result = analyze_stock(symbol, candles)
+                if result:
+                    results.append(result)
+
+                if index % 25 == 0 or index == len(symbols):
+                    logging.info(
+                        "Progress %d/%d | results=%d | failures=%d",
+                        index, len(symbols), len(results), len(failures)
+                    )
+            except Exception as error:
+                failures.append({
+                    "symbol": symbol,
+                    "error": str(error)[:500]
+                })
+                logging.warning("Failed %s: %s", symbol, str(error)[:250])
+
+            time.sleep(REQUEST_DELAY)
+    finally:
+        client.close()
+
+    save_results(results, failures, len(symbols))
+
+    if failures:
+        logging.warning(
+            "%d of %d symbols failed. See data/nse_scan_failures.json",
+            len(failures), len(symbols)
+        )
+
+
+if __name__ == "__main__":
+    main()
