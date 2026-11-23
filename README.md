@@ -1,4 +1,4 @@
-# Indian NSE Top-5 Swing Research Scanner
+# Indian NSE Swing Research Scanner
 
 Daily, read-only stock research scanner using **Upstox** market data, company fundamentals and instrument news. It does not place orders and does not promise profits.
 
@@ -8,9 +8,11 @@ Daily, read-only stock research scanner using **Upstox** market data, company fu
 3. Fetches daily candles for every NSE_EQ stock with a valid positive quote and traded volume. A rolling request throttle stays below Upstox's published API limits; a full scan can take roughly 2.5–3 hours.
 4. Ranks technical swing setups (trend, pullback/support, RSI, MACD, volume, risk and reward).
 5. Researches the leading 25 technical candidates with Upstox company ratios, income statement, cash flow, balance sheet and Upstox news from the previous 7 days.
-6. Sends a CSV containing up to 5 qualified stocks to Telegram and saves it as:
-   - `data/top5_swing_stocks.csv` (latest)
-   - `data/top5_swing_stocks_YYYY-MM-DD.csv` (dated copy)
+6. Sends **every stock that passes the qualification filters** (no top-5 output cap) to Telegram and saves:
+   - `data/all_swing_stocks.csv` (latest)
+   - `data/all_swing_stocks_YYYY-MM-DD.csv` (dated copy)
+
+The current research stage evaluates the top `MAX_FUNDAMENTAL_CANDIDATES` technical candidates (default 25); the CSV includes all qualified stocks within that researched pool. Increase that Actions variable to research more candidates. This is separate from the removed top-5 CSV limit.
 
 If fewer than five stocks meet the minimum score, the CSV contains only those qualified stocks; if none qualify, it contains headers and no stock rows. No forced picks.
 
