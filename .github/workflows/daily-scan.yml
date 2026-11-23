@@ -2,8 +2,8 @@ name: Daily NSE Top-5 Swing Research
 
 on:
   schedule:
-    # 4:45 PM IST weekdays, after the regular NSE cash session
-    - cron: '15 11 * * 1-5'
+    # 4:15 PM IST weekdays, after the regular NSE cash session
+    - cron: '45 10 * * 1-5'
   workflow_dispatch:
 
 permissions:
