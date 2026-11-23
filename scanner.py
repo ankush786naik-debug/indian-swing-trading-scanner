@@ -223,21 +223,21 @@ def main():
                 failures.append({"symbol":s["symbol"],"stage":"research","error":str(e)[:300]})
                 logging.warning("Research error %s: %s",s["symbol"],str(e)[:180])
         researched.sort(key=lambda x:x["combined_score"],reverse=True)
-        top=[x for x in researched if x["combined_score"]>=MIN_SCORE][:5]
+        qualified=[x for x in researched if x["combined_score"]>=MIN_SCORE]
         columns=["rank","symbol","name","date","close","entry_low","entry_high","stop_loss","target_1","target_2",
                  "target_1_return_pct","target_2_return_pct","risk_pct","combined_score","technical_score","fundamental_score",
                  "fundamental_coverage","news_score","news_sentiment","news_count_7d","news_headlines","news_links","ROCE_pct",
                  "ROE_pct","Revenue_growth_pct","Net_profit_growth_pct","PE","Sector_PE","Operating_cash_flow_crore",
                  "Liabilities_to_assets","weekly_trend","rsi","volume_ratio","support20","turnover_crore","technical_reasons"]
-        rows=[{"rank":i,**{k:s.get(k) for k in columns if k!="rank"}} for i,s in enumerate(top,1)]
+        rows=[{"rank":i,**{k:s.get(k) for k in columns if k!="rank"}} for i,s in enumerate(qualified,1)]
         today=date.today().isoformat()
-        path=os.path.join(OUT,"top5_swing_stocks.csv")
+        path=os.path.join(OUT,"all_swing_stocks.csv")
         pd.DataFrame(rows,columns=columns).to_csv(path,index=False,encoding="utf-8-sig")
-        pd.DataFrame(rows,columns=columns).to_csv(os.path.join(OUT,f"top5_swing_stocks_{today}.csv"),index=False,encoding="utf-8-sig")
+        pd.DataFrame(rows,columns=columns).to_csv(os.path.join(OUT,f"all_swing_stocks_{today}.csv"),index=False,encoding="utf-8-sig")
         export_json({"date":today,"nse_eq_universe":len(universe),"quote_screened":len(active),"deep_candle_candidates":len(candle_stocks),
-                     "technical_valid":len(tech),"news_fundamental_research":len(pool),"qualified_top5":len(top),"failures":failures},"scan_diagnostics.json")
-        caption=(f"📊 NSE TOP-5 SWING RESEARCH | {today}\nNSE EQ universe: {len(universe)} | active quote universe: {len(active)}\n"
-                 f"Daily candles: {len(candle_stocks)} across the full active NSE_EQ universe\nFundamentals + 7-day news: {len(pool)} | Qualified picks: {len(top)}\nNo forced picks. Research only; no orders placed.")
+                     "technical_valid":len(tech),"news_fundamental_research":len(pool),"qualified_stocks":len(qualified),"research_candidate_limit":RESEARCH_LIMIT,"failures":failures},"scan_diagnostics.json")
+        caption=(f"📊 NSE QUALIFIED SWING RESEARCH | {today}\nNSE EQ universe: {len(universe)} | active quote universe: {len(active)}\n"
+                 f"Daily candles: {len(candle_stocks)} across the full active NSE_EQ universe\nFundamentals + 7-day news: {len(pool)} | Qualified stocks (no top-5 cap): {len(qualified)}\nNo forced picks. Research only; no orders placed.")
         logging.info(caption);send_telegram_message(caption);send_telegram_document(path,caption)
     finally:client.close()
 
