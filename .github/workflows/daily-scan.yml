@@ -1,9 +1,9 @@
-name: Daily Indian Stock Scanner
+name: Daily NSE Top-5 Swing Research
 
 on:
-  # TejHQ publishes daily NSE bhavcopy in the evening; run after its retry window.
   schedule:
-    - cron: '15 16 * * 1-5'
+    # 4:45 PM IST weekdays, after the regular NSE cash session
+    - cron: '15 11 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -12,42 +12,39 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-
+    timeout-minutes: 60
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Validate Python files
+      - name: Validate Python
         run: python -m compileall -q .
-
-      - name: Run stock scanner
+      - name: Run all-NSE swing research
         env:
-          TEJ_API_KEY: ${{ secrets.TEJ_API_KEY }}
+          UPSTOX_ANALYTICS_TOKEN: ${{ secrets.UPSTOX_ANALYTICS_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          CAPITAL: '100000'
-          MIN_STOCK_PRICE: '200'
-          MAX_STOCKS: '500'
-          RISK_PER_TRADE: '0.01'
+          MAX_CANDLE_CANDIDATES: '350'
+          MAX_FUNDAMENTAL_CANDIDATES: '25'
+          MIN_DAILY_TURNOVER_CRORE: '3'
+          MIN_FINAL_SCORE: '62'
         run: python scanner.py
-
-      - name: Upload scanner outputs
+      - name: Upload daily Top-5 CSV and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nse-scanner-results
-          path: data/
+          name: daily-top5-swing-research
+          path: |
+            data/top5_swing_stocks.csv
+            data/top5_swing_stocks_*.csv
+            data/scan_diagnostics.json
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 30
