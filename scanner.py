@@ -212,7 +212,7 @@ def main():
                 fscore=fundamentals_score(client.fundamentals(s["isin"]))
                 nscore=news_score(news.get(s["instrument_key"],[]) if isinstance(news,dict) else [])
                 if fscore["fundamental_score"] is None or fscore["fundamental_coverage"]<.45:continue
-                if nscore["news_count_7d"]==0 or nscore["news_sentiment"]<-.25:continue
+                if nscore["news_count_7d"]==0 or nscore["news_sentiment"]<=0:continue
                 if s["turnover_crore"]<TURNOVER_MIN:continue
                 if s["technical_score"]<55 or s["risk_pct"]>5.0:continue
                 combined=.45*s["technical_score"]+.40*fscore["fundamental_score"]+.15*nscore["news_score"]
