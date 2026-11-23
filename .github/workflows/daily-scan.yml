@@ -1,9 +1,9 @@
-
 name: Daily Indian Stock Scanner
 
 on:
+  # TejHQ publishes daily NSE bhavcopy in the evening; run after its retry window.
   schedule:
-    - cron: '30 11 * * 1-5'
+    - cron: '15 16 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -12,6 +12,7 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -28,34 +29,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Diagnose EODHD India coverage
-        env:
-          EODHD_API_TOKEN: ${{ secrets.EODHD_API_TOKEN }}
-        run: |
-          python - <<'PY'
-          import os
-          import requests
-
-          token = os.environ["EODHD_API_TOKEN"]
-          base = "https://eodhd.com/api"
-
-          for endpoint in [
-              "exchanges-list/",
-              "exchange-symbol-list/NSE",
-              "eod/ABB.NSE"
-          ]:
-              response = requests.get(
-                  f"{base}/{endpoint}",
-                  params={"api_token": token, "fmt": "json"},
-                  timeout=30
-              )
-              print(f"\n{endpoint}: HTTP {response.status_code}")
-              print(response.text[:1000])
-          PY
+      - name: Validate Python files
+        run: python -m compileall -q .
 
       - name: Run stock scanner
         env:
-          EODHD_API_TOKEN: ${{ secrets.EODHD_API_TOKEN }}
+          TEJ_API_KEY: ${{ secrets.TEJ_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CAPITAL: '100000'
@@ -63,4 +42,12 @@ jobs:
           MAX_STOCKS: '500'
           RISK_PER_TRADE: '0.01'
         run: python scanner.py
-        
+
+      - name: Upload scanner outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nse-scanner-results
+          path: data/
+          if-no-files-found: warn
+          retention-days: 7
