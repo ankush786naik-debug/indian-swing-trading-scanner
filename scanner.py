@@ -172,9 +172,15 @@ def main():
         universe=client.load_nse_equities()
         logging.info("ALL NSE_EQ instruments loaded: %d",len(universe))
         quote_data=client.quotes([x["instrument_key"] for x in universe])
-        lookup={x["instrument_key"]:x for x in universe}; liquid=[]
+        lookup={x["instrument_key"]:x for x in universe}
+        by_symbol={x["symbol"]:x for x in universe}
+        liquid=[]
         for key,q in quote_data.items():
             stock=lookup.get(key)
+            # Upstox quote response keys are NSE_EQ:SYMBOL, not instrument_key.
+            if stock is None:
+                quote_symbol=(q.get("symbol") if isinstance(q,dict) else None) or str(key).split(":")[-1]
+                stock=by_symbol.get(quote_symbol)
             if not stock or not isinstance(q,dict):continue
             ltp=num(q.get("last_price")); volume=num(q.get("volume"))
             if not ltp or not volume or ltp<=0 or volume<=0:continue
