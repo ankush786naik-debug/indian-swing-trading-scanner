@@ -23,7 +23,7 @@ Add these in **Settings → Secrets and variables → Actions**:
 Use the Analytics Token rather than a standard access token if available; standard OAuth access tokens expire daily. Never commit tokens into files.
 
 ## Schedule
-Weekdays at 4:45 PM IST, after the NSE cash session. Manual trigger is available under Actions → Daily NSE Top-5 Swing Research → Run workflow.
+Weekdays at 4:15 PM IST, after the NSE cash session. Since the full active-universe candle scan is rate-limited, Telegram delivery may be around 6:45–7:00 PM IST. Manual trigger is available under Actions → Daily NSE Top-5 Swing Research → Run workflow.
 
 ## Research scoring
 Combined score: 45% technical setup, 40% fundamentals, 15% recent news. Negative news can disqualify a candidate. Fundamentals include ROCE, ROE, revenue/profit growth, operating cash flow, valuation relative to sector and liabilities/assets when the API provides sufficient data. News comes from Upstox's instrument news endpoint (articles from the previous 7 days).
