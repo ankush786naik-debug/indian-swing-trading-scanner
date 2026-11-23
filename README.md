@@ -1,148 +1,34 @@
+# Indian NSE Top-5 Swing Research Scanner
 
-# NSE Market Data API
+Daily, read-only stock research scanner using **Upstox** market data, company fundamentals and instrument news. It does not place orders and does not promise profits.
 
-Python integration for TejHQ Indian stock market data.
+## What it does
+1. Downloads Upstox's daily NSE instrument master and dynamically includes all NSE_EQ / EQ stocks available in the master. No static Nifty 500 or 1,000-symbol list and no stock-price boundary.
+2. Uses batched Upstox full-market quotes to screen the complete universe by valid price/volume and a configurable minimum daily turnover (default ₹3 crore).
+3. Fetches daily candles for the **350 most liquid stocks that day** (dynamic candidates, not a hard-coded membership list) to stay within Upstox's published API request limits.
+4. Ranks technical swing setups (trend, pullback/support, RSI, MACD, volume, risk and reward).
+5. Researches the leading 25 technical candidates with Upstox company ratios, income statement, cash flow, balance sheet and Upstox news from the previous 7 days.
+6. Sends a CSV containing up to 5 qualified stocks to Telegram and saves it as:
+   - `data/top5_swing_stocks.csv` (latest)
+   - `data/top5_swing_stocks_YYYY-MM-DD.csv` (dated copy)
 
-## Features
+If fewer than five stocks meet the minimum score, the CSV contains only those qualified stocks; if none qualify, it contains headers and no stock rows. No forced picks.
 
-- NSE historical OHLCV
-- NSE full market snapshots
-- Corporate actions
-- Adjusted historical prices
-- Delivery data
-- NSE symbol history
-- JSON and CSV exports
+## GitHub Actions secrets
+Add these in **Settings → Secrets and variables → Actions**:
+- `UPSTOX_ANALYTICS_TOKEN` — Upstox Analytics Token. It is read-only and intended for market-data access. Add it separately to this repository even if it exists in another repo.
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
 
-## Installation
+Use the Analytics Token rather than a standard access token if available; standard OAuth access tokens expire daily. Never commit tokens into files.
 
-Python 3.10 or later recommended.
+## Schedule
+Weekdays at 4:45 PM IST, after the NSE cash session. Manual trigger is available under Actions → Daily NSE Top-5 Swing Research → Run workflow.
 
-Create a virtual environment:
+## Research scoring
+Combined score: 45% technical setup, 40% fundamentals, 15% recent news. Negative news can disqualify a candidate. Fundamentals include ROCE, ROE, revenue/profit growth, operating cash flow, valuation relative to sector and liabilities/assets when the API provides sufficient data. News comes from Upstox's instrument news endpoint (articles from the previous 7 days).
 
-```bash
-python -m venv .venv
-```
+## Important limits and validation
+Upstox full-market quotes support batches up to 500 instruments; news supports up to 30 instrument keys per request. Standard API rate limits are 500 requests/minute and 2,000 per 30 minutes. The scanner therefore screens all NSE equity quotes but deep-candle analyses a dynamic liquid shortlist, then researches a smaller group. It cannot request historical candles for every several-thousand NSE equity daily within those quotas.
 
-Activate it:
-
-Windows:
-
-```bash
-.venv\Scripts\activate
-```
-
-Linux/macOS:
-
-```bash
-source .venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-## Configuration
-
-Copy `.env.example` to `.env`.
-
-Add your TejHQ API key:
-
-```env
-TEJ_API_BASE_URL=https://api.tejhq.dev
-TEJ_API_KEY=YOUR_TEJHQ_KEY
-DEFAULT_EXCHANGE=nse
-REQUEST_TIMEOUT=30
-```
-
-The API key is optional for keyless endpoints.
-
-## Usage
-
-### 1. NSE historical prices
-
-```bash
-python -m app.main ohlcv RELIANCE \
-  --from-date 2025-01-01 \
-  --to-date 2025-12-31
-```
-
-### 2. Adjusted historical prices
-
-Requires a free API key.
-
-```bash
-python -m app.main ohlcv RELIANCE \
-  --adjusted \
-  --from-date 2025-01-01 \
-  --to-date 2025-12-31
-```
-
-### 3. NSE full market snapshot
-
-```bash
-python -m app.main snapshot \
-  --date 2025-11-14
-```
-
-### 4. Corporate actions
-
-```bash
-python -m app.main actions RELIANCE
-```
-
-### 5. Delivery data
-
-Requires a free API key.
-
-```bash
-python -m app.main delivery RELIANCE \
-  --from-date 2025-01-01 \
-  --to-date 2025-12-31
-```
-
-### 6. NSE symbols
-
-Requires a free API key.
-
-```bash
-python -m app.main symbols
-```
-
-### 7. Export to CSV
-
-```bash
-python -m app.main ohlcv RELIANCE \
-  --from-date 2025-01-01 \
-  --format csv \
-  --output reliance_prices
-```
-
-### 8. Export to JSON
-
-```bash
-python -m app.main actions RELIANCE \
-  --format json \
-  --output reliance_actions
-```
-
-## API Provider
-
-TejHQ
-
-https://tejhq.dev/docs
-
-API server:
-
-https://api.tejhq.dev
-
-## Security
-
-Never commit your `.env` file or publish your API key.
-
-## Disclaimer
-
-Market data is provided for research and analysis.
-Verify important values before making investment decisions.
-
+The first live run is required to validate your token's access to quotes, candles, fundamentals and news and the actual response fields. Missing fundamentals/news are not treated as positive. Review the CSV and verify live price before entry; stops/targets are modelled levels, not guarantees.
