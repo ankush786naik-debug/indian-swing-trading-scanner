@@ -1,5 +1,6 @@
 """Upstox Analytics API client; read-only market data endpoints."""
 import gzip,json,os,time
+from collections import deque
 from urllib.parse import quote
 import requests
 BASE="https://api.upstox.com"
@@ -12,12 +13,26 @@ class UpstoxClient:
         self.session=requests.Session()
         self.session.headers.update({"Accept":"application/json","Authorization":f"Bearer {self.token}","User-Agent":"NSE-Swing-Research/2.0"})
         self.last=0.0
+        self.calls_60=deque()
+        self.calls_1800=deque()
+    def throttle(self):
+        # Conservative sliding windows below Upstox 500/min and 2,000/30-min caps.
+        while True:
+            now=time.monotonic()
+            while self.calls_60 and now-self.calls_60[0]>=60:self.calls_60.popleft()
+            while self.calls_1800 and now-self.calls_1800[0]>=1800:self.calls_1800.popleft()
+            wait=max(.13-(now-self.last),0)
+            if len(self.calls_60)>=450:wait=max(wait,60-(now-self.calls_60[0])+.2)
+            if len(self.calls_1800)>=1850:wait=max(wait,1800-(now-self.calls_1800[0])+.2)
+            if wait>0:time.sleep(wait);continue
+            now=time.monotonic()
+            self.calls_60.append(now);self.calls_1800.append(now);self.last=now
+            return
     def get(self,path,params=None,retries=4):
         for attempt in range(retries):
-            wait=max(.13-(time.monotonic()-self.last),0)
-            if wait:time.sleep(wait)
+            self.throttle()
             try:
-                response=self.session.get(BASE+path,params=params,timeout=30);self.last=time.monotonic()
+                response=self.session.get(BASE+path,params=params,timeout=30)
                 if response.status_code==429 or response.status_code>=500:
                     if attempt+1<retries:time.sleep(min(2**attempt,12));continue
                 response.raise_for_status();payload=response.json()
