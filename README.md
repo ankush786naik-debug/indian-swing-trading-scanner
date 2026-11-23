@@ -4,7 +4,7 @@ Daily, read-only stock research scanner using **Upstox** market data, company fu
 
 ## What it does
 1. Downloads Upstox's daily NSE instrument master and dynamically includes all NSE_EQ / EQ stocks available in the master. No static Nifty 500 or 1,000-symbol list and no stock-price boundary.
-2. Uses batched Upstox full-market quotes to screen the complete universe by valid price/volume and a configurable minimum daily turnover (default ₹3 crore).
+2. Uses batched Upstox full-market quotes for every NSE_EQ stock. It includes all symbols with a valid positive last price and traded volume in the historical scan; the ₹3 crore turnover threshold is applied to final recommendations.
 3. Fetches daily candles for every NSE_EQ stock with a valid positive quote and traded volume. A rolling request throttle stays below Upstox's published API limits; a full scan can take roughly 2.5–3 hours.
 4. Ranks technical swing setups (trend, pullback/support, RSI, MACD, volume, risk and reward).
 5. Researches the leading 25 technical candidates with Upstox company ratios, income statement, cash flow, balance sheet and Upstox news from the previous 7 days.
