@@ -166,6 +166,14 @@ def analyze(symbol,candles):
             "target_2_return_pct":round((t2/p-1)*100,2),"risk_pct":round((p-stop)/p*100,2),
             "technical_reasons":"; ".join(why)}
 
+def map_quote_to_stock(key, quote_row, by_key, by_symbol):
+    stock=by_key.get(key)
+    if stock is None:
+        symbol=(quote_row.get("symbol") if isinstance(quote_row,dict) else None) or str(key).split(":")[-1]
+        stock=by_symbol.get(symbol)
+    return stock
+
+
 def main():
     client=UpstoxClient(); failures=[]
     try:
@@ -176,11 +184,8 @@ def main():
         by_symbol={x["symbol"]:x for x in universe}
         liquid=[]
         for key,q in quote_data.items():
-            stock=lookup.get(key)
-            # Upstox quote response keys are NSE_EQ:SYMBOL, not instrument_key.
-            if stock is None:
-                quote_symbol=(q.get("symbol") if isinstance(q,dict) else None) or str(key).split(":")[-1]
-                stock=by_symbol.get(quote_symbol)
+            # Upstox quote data keys use NSE_EQ:SYMBOL, not instrument_key.
+            stock=map_quote_to_stock(key,q,lookup,by_symbol)
             if not stock or not isinstance(q,dict):continue
             ltp=num(q.get("last_price")); volume=num(q.get("volume"))
             if not ltp or not volume or ltp<=0 or volume<=0:continue
@@ -208,6 +213,7 @@ def main():
                 nscore=news_score(news.get(s["instrument_key"],[]) if isinstance(news,dict) else [])
                 if fscore["fundamental_score"] is None or fscore["fundamental_coverage"]<.45:continue
                 if nscore["news_count_7d"]==0 or nscore["news_sentiment"]<-.25:continue
+                if s["technical_score"]<55 or s["risk_pct"]>5.0:continue
                 combined=.45*s["technical_score"]+.40*fscore["fundamental_score"]+.15*nscore["news_score"]
                 researched.append({**s,**fscore,**nscore,"combined_score":round(combined,1)})
             except Exception as e:
