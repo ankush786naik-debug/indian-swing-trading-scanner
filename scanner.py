@@ -223,8 +223,24 @@ def main():
                 failures.append({"symbol":s["symbol"],"stage":"research","error":str(e)[:300]})
                 logging.warning("Research error %s: %s",s["symbol"],str(e)[:180])
         researched.sort(key=lambda x:x["combined_score"],reverse=True)
-        qualified=[x for x in researched if x["combined_score"]>=MIN_SCORE]
-        columns=["rank","symbol","name","date","close","entry_low","entry_high","stop_loss","target_1","target_2",
+        # Export technical BUY-watch candidates independently of optional news/fundamental
+        # coverage. Those data sources frequently return sparse records; they must not
+        # silently make the CSV empty when a valid technical setup exists.
+        researched_by_symbol={x["symbol"]:x for x in researched}
+        qualified=[]
+        for candidate in tech:
+            if candidate["technical_score"] < 55 or candidate["risk_pct"] > 5.0:
+                continue
+            if candidate.get("turnover_crore",0) < TURNOVER_MIN:
+                continue
+            extra=researched_by_symbol.get(candidate["symbol"],{})
+            row={**candidate,**extra}
+            row["combined_score"]=extra.get("combined_score",candidate["technical_score"])
+            row["research_status"]="Fundamental/news researched" if extra else "Technical candidate; not in research pool or research filters not met"
+            row["buy_status"]="BUY WATCHLIST - verify live price and entry"
+            qualified.append(row)
+        qualified.sort(key=lambda x:(x.get("combined_score",0),x.get("technical_score",0)),reverse=True)
+        columns=["rank","buy_status","research_status","symbol","name","date","close","entry_low","entry_high","stop_loss","target_1","target_2",
                  "target_1_return_pct","target_2_return_pct","risk_pct","combined_score","technical_score","fundamental_score",
                  "fundamental_coverage","news_score","news_sentiment","news_count_7d","news_headlines","news_links","ROCE_pct",
                  "ROE_pct","Revenue_growth_pct","Net_profit_growth_pct","PE","Sector_PE","Operating_cash_flow_crore",
@@ -235,7 +251,7 @@ def main():
         pd.DataFrame(rows,columns=columns).to_csv(path,index=False,encoding="utf-8-sig")
         pd.DataFrame(rows,columns=columns).to_csv(os.path.join(OUT,f"all_swing_stocks_{today}.csv"),index=False,encoding="utf-8-sig")
         export_json({"date":today,"nse_eq_universe":len(universe),"quote_screened":len(active),"deep_candle_candidates":len(candle_stocks),
-                     "technical_valid":len(tech),"news_fundamental_research":len(pool),"qualified_stocks":len(qualified),"research_candidate_limit":RESEARCH_LIMIT,"failures":failures},"scan_diagnostics.json")
+                     "technical_valid":len(tech),"news_fundamental_research":len(pool),"qualified_stocks":len(qualified),"fundamental_news_qualified":len(researched),"technical_buy_watch_candidates":len(qualified),"research_candidate_limit":RESEARCH_LIMIT,"failures":failures},"scan_diagnostics.json")
         caption=(f"📊 NSE QUALIFIED SWING RESEARCH | {today}\nNSE EQ universe: {len(universe)} | active quote universe: {len(active)}\n"
                  f"Daily candles: {len(candle_stocks)} across the full active NSE_EQ universe\nFundamentals + 7-day news: {len(pool)} | Qualified stocks (no top-5 cap): {len(qualified)}\nNo forced picks. Research only; no orders placed.")
         logging.info(caption);send_telegram_message(caption);send_telegram_document(path,caption)
